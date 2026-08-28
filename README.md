@@ -1,6 +1,7 @@
 # EnCoder
 
 design_process/corecoder-note里有一些设计过程/学习心得
+设计思想参考 https://github.com/shareAI-lab/learn-claude-code
 
 这份文档只介绍 CoreCoder 在原项目基础上的新增能力。原项目的基础 Agent loop、模型适配、基础文件工具、上下文压缩和会话功能，请参阅 https://github.com/he-yufeng/CoreCoder。
 
