@@ -10,7 +10,7 @@ def system_prompt(tools, memory_block: str | None = None) -> str:
     uname = platform.uname()
 
     text = f"""\
-You are CoreCoder running in the user's terminal.
+You are Encoder running in the user's terminal.
 You help with software engineering: writing code, fixing bugs, refactoring, explaining code, running commands, and more.
 
 # Environment

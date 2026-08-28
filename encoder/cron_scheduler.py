@@ -2,7 +2,7 @@
 
 A user can ask the agent to do something on a schedule ("every day at 8am,
 collect the AI news and summarize it for me").  The task is stored globally
-under ~/.corecoder/tasks.json so it survives restarts and only stops when the
+under ~/.encoder/tasks.json so it survives restarts and only stops when the
 user deletes it.
 
 A background daemon thread polls the clock; when a task's HH:MM has arrived
@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-TASKS_FILE = Path.home() / ".corecoder" / "tasks.json"
+TASKS_FILE = Path.home() / ".encoder" / "tasks.json"
 _TASKS_DIR = TASKS_FILE.parent
 
 # "HH:MM", e.g. "08:00"
@@ -62,7 +62,7 @@ def load_tasks() -> list[ScheduleTask]:
 
 
 def save_tasks(tasks: list[ScheduleTask]) -> None:
-    """Persist tasks to ~/.corecoder/tasks.json."""
+    """Persist tasks to ~/.encoder/tasks.json."""
     _TASKS_DIR.mkdir(parents=True, exist_ok=True)
     data = [t.__dict__ for t in tasks]
     TASKS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -137,7 +137,7 @@ class CronScheduler:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop.clear()
-            self._thread = threading.Thread(target=self._run, name="corecoder-cron", daemon=True)
+            self._thread = threading.Thread(target=self._run, name="encoder-cron", daemon=True)
         self._thread.start()
 
     def stop(self, join: bool = True) -> None:

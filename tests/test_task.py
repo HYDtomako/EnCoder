@@ -5,11 +5,11 @@ import threading
 
 import pytest
 
-from corecoder.task import MAX_ATTEMPTS, PRIORITIES, STATES, TaskManager, TodoList
-from corecoder.tools.task import (
+from encoder.task import MAX_ATTEMPTS, PRIORITIES, STATES, TaskManager, TodoList
+from encoder.tools.task import (
     ArchiveTasksTool, CreateTaskTool, DispatchTaskTool, ListTasksTool, UpdateTaskTool,
 )
-from corecoder.tools.todo import CreateTodoTool, UpdateTodoTool
+from encoder.tools.todo import CreateTodoTool, UpdateTodoTool
 
 
 class _FakeParent:
@@ -93,7 +93,7 @@ def test_create_rejects_blank_description(tmp_path):
 
 
 def test_file_slug_falls_back_to_task_id_on_blank():
-    from corecoder.task import _file_slug
+    from encoder.task import _file_slug
     assert _file_slug("   ", "abc123") == "abc123"
 
 
@@ -247,7 +247,7 @@ def test_dispatch_success_writes_result(monkeypatch, tmp_path):
     parent = _FakeParent(tmp_path)
     task = parent.tasks.create("写测试")
     monkeypatch.setattr(
-        "corecoder.tools.task.spawn_subagent", lambda parent_, desc: "fake output")
+        "encoder.tools.task.spawn_subagent", lambda parent_, desc: "fake output")
     tool = _tool(DispatchTaskTool, parent)
     r = tool.execute(task_id=task.task_id)
     assert "completed" in r
@@ -262,7 +262,7 @@ def test_dispatch_failure_marks_last_error_and_stays_in_progress(monkeypatch, tm
     task = parent.tasks.create("flaky")
     def boom(parent_, desc):
         raise RuntimeError("agent died")
-    monkeypatch.setattr("corecoder.tools.task.spawn_subagent", boom)
+    monkeypatch.setattr("encoder.tools.task.spawn_subagent", boom)
     tool = _tool(DispatchTaskTool, parent)
     r = tool.execute(task_id=task.task_id)
     assert "Error dispatching" in r
@@ -277,7 +277,7 @@ def test_dispatch_hits_max_attempts(monkeypatch, tmp_path):
     task = parent.tasks.create("doomed")
     def boom(parent_, desc):
         raise RuntimeError("agent died")
-    monkeypatch.setattr("corecoder.tools.task.spawn_subagent", boom)
+    monkeypatch.setattr("encoder.tools.task.spawn_subagent", boom)
     tool = _tool(DispatchTaskTool, parent)
     for _ in range(MAX_ATTEMPTS):
         tool.execute(task_id=task.task_id)
@@ -366,7 +366,7 @@ def test_concurrent_mark_different_tasks(tmp_path):
 def test_tool_workflow_create_list_dispatch_archive(monkeypatch, tmp_path):
     parent = _FakeParent(tmp_path)
     monkeypatch.setattr(
-        "corecoder.tools.task.spawn_subagent", lambda parent_, desc: f"done: {desc}")
+        "encoder.tools.task.spawn_subagent", lambda parent_, desc: f"done: {desc}")
 
     create = _tool(CreateTaskTool, parent)
     sub = create.execute(description="子任务A", priority="high")

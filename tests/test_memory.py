@@ -1,4 +1,4 @@
-"""Tests for the file-based memory system (corecoder/memory.py), v2 layout.
+"""Tests for the file-based memory system (encoder/memory.py), v2 layout.
 
 v2 layout (per DESIGN_memory_v2.md / xuigai.md):
     .MEMORY/index.json          JSON index (derived, rebuilt from .md)
@@ -13,8 +13,8 @@ ScriptedLLM so no network is touched.
 
 import json
 
-from corecoder.llm import LLMResponse, ScriptedLLM
-from corecoder.memory import MemoryManager
+from encoder.llm import LLMResponse, ScriptedLLM
+from encoder.memory import MemoryManager
 
 
 def _mgr(tmp_path, llm=None, **kw):
@@ -57,7 +57,7 @@ def test_store_creates_category_file_and_index(tmp_path):
 
 def test_store_survives_reload_and_hand_edit(tmp_path):
     mm = _mgr(tmp_path)
-    _store(mm, "deploy", "work", "生产部署需要 export CORECODER_ENV=prod")
+    _store(mm, "deploy", "work", "生产部署需要 export ENCODER_ENV=prod")
 
     mm2 = _mgr(tmp_path)  # fresh instance -> reload from disk
     assert mm2.list_meta()[0].title == "deploy"
@@ -89,7 +89,7 @@ def test_keywords_describe_the_topic(tmp_path):
 
 def test_recall_keyword_fallback(tmp_path):
     mm = _mgr(tmp_path)
-    _store(mm, "deploy", "work", "生产部署需要 export CORECODER_ENV=prod")
+    _store(mm, "deploy", "work", "生产部署需要 export ENCODER_ENV=prod")
     block = mm.recall("怎么生产部署？")
     assert block and "deploy" in block
 
@@ -100,7 +100,7 @@ def test_recall_empty_index_returns_none(tmp_path):
 
 def test_recall_follow_up_reuses_block(tmp_path):
     mm = _mgr(tmp_path)
-    _store(mm, "deploy", "work", "生产部署需要 export CORECODER_ENV=prod")
+    _store(mm, "deploy", "work", "生产部署需要 export ENCODER_ENV=prod")
     b1 = mm.recall("生产部署流程")
     b2 = mm.recall("继续")  # short follow-up -> reuse existing block
     assert b1 is not None and b2 == b1

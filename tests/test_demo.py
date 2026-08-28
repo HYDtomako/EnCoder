@@ -2,8 +2,8 @@
 
 import pytest
 
-from corecoder.llm import LLMResponse, ScriptedLLM, ToolCall
-from corecoder.demo import run_demo, _script
+from encoder.llm import LLMResponse, ScriptedLLM, ToolCall
+from encoder.demo import run_demo, _script
 
 
 def test_scripted_llm_plays_turns_in_order():
@@ -24,7 +24,7 @@ def test_scripted_llm_plays_turns_in_order():
 
 
 def test_demo_runs_the_full_loop(tmp_path, monkeypatch):
-    monkeypatch.setattr("corecoder.demo.tempfile.mkdtemp", lambda prefix: str(tmp_path))
+    monkeypatch.setattr("encoder.demo.tempfile.mkdtemp", lambda prefix: str(tmp_path))
 
     assert run_demo() == 0
 

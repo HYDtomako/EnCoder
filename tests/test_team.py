@@ -11,12 +11,12 @@ import time
 
 import pytest
 
-from corecoder.context import ContextManager
-from corecoder.llm import LLMResponse
-from corecoder.task import TaskManager
-from corecoder.team import TEAM_MAX, Mailbox, TeamManager
-from corecoder.tools import ALL_TOOLS
-from corecoder.tools.paths import resolve, set_cwd, set_root
+from encoder.context import ContextManager
+from encoder.llm import LLMResponse
+from encoder.task import TaskManager
+from encoder.team import TEAM_MAX, Mailbox, TeamManager
+from encoder.tools import ALL_TOOLS
+from encoder.tools.paths import resolve, set_cwd, set_root
 
 
 # --------------------------------------------------------------------------- #
@@ -138,7 +138,7 @@ def test_render_summary_empty_when_nothing():
 
 def test_team_off_by_default():
     # a plain Agent has no team manager unless team_enabled was passed
-    from corecoder import Agent, LLM
+    from encoder import Agent, LLM
     agent = Agent(llm=LLM.__new__(LLM), tools=[], memory_enabled=False)
     assert agent.team is None
     assert agent.team_enabled is False
@@ -230,7 +230,7 @@ def test_review_queues_and_prioritises(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_team_tools_return_hint_when_off():
-    from corecoder.tools.team import (
+    from encoder.tools.team import (
         CollectResultsTool, SpawnTeammateTool, ReviewTeammateTool,
         ReleaseTeammateTool, BroadcastNoticeTool,
     )
@@ -282,7 +282,7 @@ def test_resolve_uses_thread_local_cwd(tmp_path):
 
 def test_bash_cd_refuses_escape_from_root(tmp_path):
     """A `cd` outside the worktree root is refused (cwd unchanged)."""
-    import corecoder.tools.bash as bash_mod
+    import encoder.tools.bash as bash_mod
 
     set_root(str(tmp_path))
     try:

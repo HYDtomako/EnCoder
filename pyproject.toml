@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "encoder"
+version = "0.4.0"
+description = "Minimal AI coding agent inspired by Claude Code's architecture. Works with any OpenAI-compatible LLM."
+requires-python = ">=3.10"
+dependencies = [
+    "openai",
+    "prompt-toolkit",
+    "python-dotenv",
+    "rich",
+    "litellm",
+    "PyYAML",
+]
+
+[project.scripts]
+encoder = "encoder.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["encoder*"]

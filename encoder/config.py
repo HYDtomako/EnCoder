@@ -49,25 +49,25 @@ class Config:
         _load_dotenv()
         # pick up common env vars automatically
         api_key = (
-            os.getenv("CORECODER_API_KEY")
+            os.getenv("ENCODER_API_KEY")
             or os.getenv("OPENAI_API_KEY")
             or os.getenv("DEEPSEEK_API_KEY")
             or ""
         )
         return cls(
-            model=os.getenv("CORECODER_MODEL", "gpt-5.5"),
+            model=os.getenv("ENCODER_MODEL", "gpt-5.5"),
             api_key=api_key,
-            base_url=os.getenv("OPENAI_BASE_URL") or os.getenv("CORECODER_BASE_URL"),
-            max_tokens=int(os.getenv("CORECODER_MAX_TOKENS", "4096")),
-            temperature=float(os.getenv("CORECODER_TEMPERATURE", "0")),
-            max_context_tokens=int(os.getenv("CORECODER_MAX_CONTEXT", "128000")),
-            memory_enabled=os.getenv("CORECODER_MEMORY_ENABLED", "1") != "0",
-            memory_llm=os.getenv("CORECODER_MEMORY_LLM") or None,
-            provider=os.getenv("CORECODER_PROVIDER", "openai"),
-            team_enabled=os.getenv("CORECODER_TEAM_ENABLED", "0") == "1",
-            team_worktrees=os.getenv("CORECODER_TEAM_WORKTREES", "0") == "1",
-            team_max=int(os.getenv("CORECODER_TEAM_MAX", "3")),
-            team_model=os.getenv("CORECODER_TEAM_MODEL") or None,
-            team_api_key=os.getenv("CORECODER_TEAM_API_KEY") or None,
-            team_base_url=os.getenv("CORECODER_TEAM_BASE_URL") or None,
+            base_url=os.getenv("OPENAI_BASE_URL") or os.getenv("ENCODER_BASE_URL"),
+            max_tokens=int(os.getenv("ENCODER_MAX_TOKENS", "4096")),
+            temperature=float(os.getenv("ENCODER_TEMPERATURE", "0")),
+            max_context_tokens=int(os.getenv("ENCODER_MAX_CONTEXT", "128000")),
+            memory_enabled=os.getenv("ENCODER_MEMORY_ENABLED", "1") != "0",
+            memory_llm=os.getenv("ENCODER_MEMORY_LLM") or None,
+            provider=os.getenv("ENCODER_PROVIDER", "openai"),
+            team_enabled=os.getenv("ENCODER_TEAM_ENABLED", "0") == "1",
+            team_worktrees=os.getenv("ENCODER_TEAM_WORKTREES", "0") == "1",
+            team_max=int(os.getenv("ENCODER_TEAM_MAX", "3")),
+            team_model=os.getenv("ENCODER_TEAM_MODEL") or None,
+            team_api_key=os.getenv("ENCODER_TEAM_API_KEY") or None,
+            team_base_url=os.getenv("ENCODER_TEAM_BASE_URL") or None,
         )

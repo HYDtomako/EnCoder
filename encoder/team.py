@@ -291,7 +291,7 @@ class TeamManager:
         """Lazy dedicated teammate LLM if a team model is configured, else Lead's.
 
         Follows the memory min-LLM pattern: only build a separate client when
-        ``CORECODER_TEAM_MODEL`` (or team_model) is set and differs from the
+        ``ENCODER_TEAM_MODEL`` (or team_model) is set and differs from the
         Lead's model; otherwise every teammate shares the Lead's LLM instance.
         """
         if self._teammate_llm is not None:
@@ -301,12 +301,12 @@ class TeamManager:
         if model and model != getattr(lead_llm, "model", model):
             from .llm import LLM              # local import: avoid circular import
             api_key = (self.team_api_key
-                       or os.getenv("CORECODER_API_KEY")
+                       or os.getenv("ENCODER_API_KEY")
                        or os.getenv("OPENAI_API_KEY")
                        or os.getenv("DEEPSEEK_API_KEY") or "")
             base_url = (self.team_base_url
                         or os.getenv("OPENAI_BASE_URL")
-                        or os.getenv("CORECODER_BASE_URL"))
+                        or os.getenv("ENCODER_BASE_URL"))
             self._teammate_llm = LLM(model=model, api_key=api_key, base_url=base_url)
         else:
             self._teammate_llm = lead_llm

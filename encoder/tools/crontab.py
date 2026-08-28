@@ -1,7 +1,7 @@
 """Scheduled-task tools - let the agent register daily recurring tasks.
 
 The tools talk to the shared CronScheduler singleton so tasks persist
-across sessions under ~/.corecoder/tasks.json.
+across sessions under ~/.encoder/tasks.json.
 """
 
 from ..cron_scheduler import get_scheduler, valid_time

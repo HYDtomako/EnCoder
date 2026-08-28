@@ -24,10 +24,10 @@ console = Console()
 
 def _parse_args():
     p = argparse.ArgumentParser(
-        prog="corecoder",
+        prog="encoder",
         description="Minimal AI coding agent. Works with any OpenAI-compatible LLM.",
     )
-    p.add_argument("-m", "--model", help="Model name (default: $CORECODER_MODEL or gpt-5.5)")
+    p.add_argument("-m", "--model", help="Model name (default: $ENCODER_MODEL or gpt-5.5)")
     p.add_argument("--base-url", help="API base URL (default: $OPENAI_BASE_URL)")
     p.add_argument("--api-key", help="API key (default: $OPENAI_API_KEY)")
     p.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
@@ -58,7 +58,7 @@ def main():
     if not config.api_key:
         console.print("[red bold]No API key found.[/]")
         console.print(
-            "Set one of: OPENAI_API_KEY, DEEPSEEK_API_KEY, or CORECODER_API_KEY\n"
+            "Set one of: OPENAI_API_KEY, DEEPSEEK_API_KEY, or ENCODER_API_KEY\n"
             "\nExamples:\n"
             "  # OpenAI\n"
             "  export OPENAI_API_KEY=sk-...\n"
@@ -67,7 +67,7 @@ def main():
             "  export OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com\n"
             "\n"
             "  # Ollama (local)\n"
-            "  export OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://localhost:11434/v1 CORECODER_MODEL=qwen2.5-coder\n"
+            "  export OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://localhost:11434/v1 ENCODER_MODEL=qwen2.5-coder\n"
         )
         sys.exit(1)
 
@@ -159,7 +159,7 @@ def _run_scheduled(agent: Agent, task, on_tool=None):
     if chunks:
         print()
 
-    # append to ~/.corecoder/tasks.log for review when nobody watched
+    # append to ~/.encoder/tasks.log for review when nobody watched
     _append_task_log(task, "".join(chunks))
 
 
@@ -167,7 +167,7 @@ def _append_task_log(task, output: str):
     import time as _time
     from pathlib import Path
     try:
-        log = Path.home() / ".corecoder" / "tasks.log"
+        log = Path.home() / ".encoder" / "tasks.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         stamp = _time.strftime("%Y-%m-%d %H:%M:%S")
         with log.open("a", encoding="utf-8") as f:
@@ -192,7 +192,7 @@ def _daemon(agent: Agent):
         scheduler.stop()
         return
 
-    console.print(f"[bold]CoreCoder daemon[/bold] running with [cyan]{len(scheduler.list_tasks())}[/cyan] "
+    console.print(f"[bold]Encoder daemon[/bold] running with [cyan]{len(scheduler.list_tasks())}[/cyan] "
                   f"scheduled task(s). Ctrl+C to stop.")
     try:
         while True:
@@ -210,14 +210,14 @@ def _repl(agent: Agent, config: Config):
     scheduler.start()
 
     console.print(Panel(
-        f"[bold]CoreCoder[/bold] v{__version__}\n"
+        f"[bold]Encoder[/bold] v{__version__}\n"
         f"Model: [cyan]{config.model}[/cyan]"
         + (f"  Base: [dim]{config.base_url}[/dim]" if config.base_url else "")
         + "\nType [bold]/help[/bold] for commands, [bold]Ctrl+C[/bold] to cancel, [bold]quit[/bold] to exit.",
         border_style="blue",
     ))
 
-    hist_path = os.path.expanduser("~/.corecoder_history")
+    hist_path = os.path.expanduser("~/.encoder_history")
     history = FileHistory(hist_path)
 
     # Enter submits, Escape+Enter inserts a newline (for pasting code blocks etc.)
@@ -302,7 +302,7 @@ def _repl(agent: Agent, config: Config):
         if user_input == "/save":
             sid = save_session(agent.messages, config.model)
             console.print(f"[green]Session saved: {sid}[/green]")
-            console.print(f"Resume with: corecoder -r {sid}")
+            console.print(f"Resume with: encoder -r {sid}")
             continue
         if user_input == "/diff":
             from .tools.edit import _changed_files
@@ -646,12 +646,12 @@ def _show_help():
         "  /task          List tasks; /task show <id> | update <id> <state|priority>\n"
         "                 /task archive <root_id> | clear\n"
         "  /team          Teammate mode: status | on | off | release <name>\n"
-        "  quit           Exit CoreCoder\n"
+        "  quit           Exit Encoder\n"
         "\n"
         "[bold]Input:[/bold]\n"
         "  Enter          Submit message\n"
         "  Esc+Enter      Insert newline (for pasting code)",
-        title="CoreCoder Help",
+        title="Encoder Help",
         border_style="dim",
     ))
 

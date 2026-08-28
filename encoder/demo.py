@@ -71,12 +71,12 @@ def _summarize(args: dict) -> str:
 
 
 def run_demo() -> int:
-    workdir = Path(tempfile.mkdtemp(prefix="corecoder-demo-"))
+    workdir = Path(tempfile.mkdtemp(prefix="encoder-demo-"))
     # memory_enabled=False: an offline scripted demo must not let MemoryManager
     # consume ScriptedLLM turns (recall would pop the write_file fib.py response)
     agent = Agent(llm=ScriptedLLM(_script(workdir)), memory_enabled=False)
 
-    console.print(Panel.fit(f"[bold]{_TASK}[/]", title="corecoder demo (offline)"))
+    console.print(Panel.fit(f"[bold]{_TASK}[/]", title="encoder demo (offline)"))
     result = agent.chat(
         _TASK,
         on_tool=lambda name, args: console.print(f"[cyan]tool:[/] {name} {_summarize(args)}"),

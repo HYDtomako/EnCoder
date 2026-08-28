@@ -1,9 +1,9 @@
 # EnCoder
 
-design_process/corecoder-note里有一些设计过程/学习心得
+design_process和corecoder-note里有一些设计过程/学习心得
 设计思想参考 https://github.com/shareAI-lab/learn-claude-code
 
-这份文档只介绍 CoreCoder 在原项目基础上的新增能力。原项目的基础 Agent loop、模型适配、基础文件工具、上下文压缩和会话功能，请参阅 https://github.com/he-yufeng/CoreCoder。
+这份文档只介绍 CoreCoder 在原项目基础上的新增能力和设计。原项目的基础 Agent loop、模型适配、基础文件工具、上下文压缩和会话功能，请参阅 https://github.com/he-yufeng/CoreCoder。
 
 ## 新增能力概览
 
@@ -15,9 +15,9 @@ design_process/corecoder-note里有一些设计过程/学习心得
 | Task | 如何保存可恢复、可依赖、可派发的工作单元 | `.TASK/` |
 | Memory v2 | 如何保存、召回、更新和维护跨回合信息 | `.MEMORY/` |
 | Agent teammate | 如何让多个常驻 Agent 独立上下文并行协作 | `.Mailbox/`，可选 `.worktrees/` |
-| 定时触发器 | 如何按每日计划自动提交 Agent 请求 | `~/.corecoder/tasks.json` |
+| 定时触发器 | 如何按每日计划自动提交 Agent 请求 | `~/.encoder/tasks.json` |
 
-此外新增了 Tavily 联网搜索和网页正文读取工具。所有新增工具都严格继承 `corecoder/tools/base.py` 中的 `Tool` 基类，并把可恢复错误作为工具结果返回，不让单个工具异常打断主循环。
+此外新增了 Tavily 联网搜索和网页正文读取工具。所有新增工具都严格继承 `encoder/tools/base.py` 中的 `Tool` 基类，并把可恢复错误作为工具结果返回，不让单个工具异常打断主循环。
 
 ## Todo 与 Task
 
@@ -74,7 +74,7 @@ dispatch_task     archive_tasks
 定时触发器允许用户让 Agent 每天在指定时间自动执行一段请求，例如每日整理资讯、检查项目状态或生成摘要。调度任务包含唯一 ID、请求内容、每日触发时间和上次触发日期，并持久化到：
 
 ```text
-~/.corecoder/tasks.json
+~/.encoder/tasks.json
 ```
 
 触发时间使用本地时区的 `HH:MM` 格式。后台调度线程每 30 秒检查一次时钟；同一任务每天最多触发一次。触发器只负责检查时间并把到期任务放入队列，真正的模型调用仍在主线程执行，因此不会打断当前正在进行的 Agent 请求。
@@ -89,10 +89,10 @@ dispatch_task     archive_tasks
 默认交互模式会在用户输入间隙执行到期任务。如果需要让定时任务在没有交互输入时也持续运行，可以启动后台模式：
 
 ```bash
-corecoder --daemon
+encoder --daemon
 ```
 
-后台模式会读取已有任务、等待触发并执行；执行结果同时记录到 `~/.corecoder/tasks.log`，方便事后查看。退出交互模式或 daemon 时，调度线程会被正常停止。
+后台模式会读取已有任务、等待触发并执行；执行结果同时记录到 `~/.encoder/tasks.log`，方便事后查看。退出交互模式或 daemon 时，调度线程会被正常停止。
 
 ## Agent teammate 协作
 
@@ -162,14 +162,14 @@ TAVILY_API_KEY=tvly-...
 
 | 环境变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `CORECODER_MEMORY_ENABLED` | `1` | 启用记忆系统；设为 `0` 关闭 |
-| `CORECODER_MEMORY_LLM` | 主模型 | 记忆语义判断使用的低成本模型 |
-| `CORECODER_TEAM_ENABLED` | `0` | 是否启用 teammate 模式 |
-| `CORECODER_TEAM_MAX` | `3` | 最大并行 teammate 数量 |
-| `CORECODER_TEAM_WORKTREES` | `0` | 是否默认尝试 Git worktree 隔离 |
-| `CORECODER_TEAM_MODEL` | 主模型 | teammate 使用的模型 |
-| `CORECODER_TEAM_API_KEY` | 主 API key | teammate 专用 API key |
-| `CORECODER_TEAM_BASE_URL` | 主 base URL | teammate 专用 API 地址 |
+| `ENCODER_MEMORY_ENABLED` | `1` | 启用记忆系统；设为 `0` 关闭 |
+| `ENCODER_MEMORY_LLM` | 主模型 | 记忆语义判断使用的低成本模型 |
+| `ENCODER_TEAM_ENABLED` | `0` | 是否启用 teammate 模式 |
+| `ENCODER_TEAM_MAX` | `3` | 最大并行 teammate 数量 |
+| `ENCODER_TEAM_WORKTREES` | `0` | 是否默认尝试 Git worktree 隔离 |
+| `ENCODER_TEAM_MODEL` | 主模型 | teammate 使用的模型 |
+| `ENCODER_TEAM_API_KEY` | 主 API key | teammate 专用 API key |
+| `ENCODER_TEAM_BASE_URL` | 主 base URL | teammate 专用 API 地址 |
 
 记忆系统和团队系统都以“失败可降级”为原则：低成本模型不可用时记忆回退到关键词路径，Mailbox 或 worktree 操作失败时保留主流程，队友异常会记录到任务和结果消息中。
 
@@ -180,8 +180,8 @@ TAVILY_API_KEY=tvly-...
 .TASK/         持久化任务、依赖、执行结果和归档
 .Mailbox/      运行期间的 Agent 间消息队列
 .worktrees/    可选的队友 Git 隔离工作区
-~/.corecoder/tasks.json  每日定时任务
-~/.corecoder/tasks.log   定时任务执行日志
+~/.encoder/tasks.json  每日定时任务
+~/.encoder/tasks.log   定时任务执行日志
 ```
 
 这些目录属于运行时数据，不应与原项目源码混为一谈。提交到版本库前，请按项目需要决定是否将它们加入 `.gitignore`。
@@ -198,5 +198,5 @@ pytest tests/ -q
 
 ```bash
 ruff check .
-python -m compileall corecoder
+python -m compileall encoder
 ```

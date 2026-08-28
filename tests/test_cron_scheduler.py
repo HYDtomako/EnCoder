@@ -4,8 +4,8 @@ from datetime import datetime
 
 import pytest
 
-import corecoder.cron_scheduler as cs
-from corecoder.cron_scheduler import CronScheduler, valid_time
+import encoder.cron_scheduler as cs
+from encoder.cron_scheduler import CronScheduler, valid_time
 
 
 # --- time validation ---
@@ -126,7 +126,7 @@ def test_start_stop_thread(tmp_path, monkeypatch):
 # --- crontab tools ---
 
 def test_crontab_tools_roundtrip(tmp_path, monkeypatch):
-    from corecoder.tools.crontab import (
+    from encoder.tools.crontab import (
         CreateScheduleTool,
         ListSchedulesTool,
         DeleteScheduleTool,
@@ -152,7 +152,7 @@ def test_crontab_tools_roundtrip(tmp_path, monkeypatch):
 
 
 def test_crontab_tool_rejects_bad_time(tmp_path, monkeypatch):
-    from corecoder.tools.crontab import CreateScheduleTool
+    from encoder.tools.crontab import CreateScheduleTool
     monkeypatch.setattr(cs, "TASKS_FILE", tmp_path / "tasks.json")
     with cs._singleton_lock:
         cs._singleton = CronScheduler()

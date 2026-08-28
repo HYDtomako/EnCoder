@@ -6,9 +6,9 @@ Tavily API.
 
 import json
 
-from corecoder.tools import get_tool
-from corecoder.tools.web_fetch import WebFetchTool
-from corecoder.tools.web_search import WebSearchTool
+from encoder.tools import get_tool
+from encoder.tools.web_fetch import WebFetchTool
+from encoder.tools.web_search import WebSearchTool
 
 
 class _FakeResp:
@@ -131,6 +131,6 @@ def test_web_tools_registered_and_have_schema():
 
 
 def test_web_tools_are_tool_subclasses():
-    from corecoder.tools.base import Tool
+    from encoder.tools.base import Tool
     for name in ("web_search", "web_fetch"):
         assert isinstance(get_tool(name), Tool)

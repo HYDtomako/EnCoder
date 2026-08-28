@@ -242,7 +242,7 @@ class MemoryManager:
         self.index_path = self.base / "index.json"
         self.conflicts_path = self.base / _CONFLICTS_FILENAME
         self.llm = llm
-        self.memory_model = memory_model or os.getenv("CORECODER_MEMORY_LLM")
+        self.memory_model = memory_model or os.getenv("ENCODER_MEMORY_LLM")
         self.max_entries = max_entries
         self._memory_llm = None
         self._last_block: str | None = None
@@ -258,11 +258,11 @@ class MemoryManager:
             if model and self.llm is not None and model != getattr(self.llm, "model", model):
                 try:
                     from .llm import LLM
-                    api_key = (os.getenv("CORECODER_MEMORY_API_KEY")
-                               or os.getenv("CORECODER_API_KEY")
+                    api_key = (os.getenv("ENCODER_MEMORY_API_KEY")
+                               or os.getenv("ENCODER_API_KEY")
                                or os.getenv("OPENAI_API_KEY")
                                or os.getenv("DEEPSEEK_API_KEY") or "")
-                    base_url = (os.getenv("CORECODER_MEMORY_BASE_URL")
+                    base_url = (os.getenv("ENCODER_MEMORY_BASE_URL")
                                 or os.getenv("OPENAI_BASE_URL") or None)
                     self._memory_llm = LLM(model=model, api_key=api_key, base_url=base_url)
                 except Exception:
