@@ -1,23 +1,23 @@
 """Interactive REPL - the user-facing terminal interface."""
 
-import sys
-import os
 import argparse
+import os
+import sys
 
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
 from prompt_toolkit import prompt as pt_prompt
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
 
-from .agent import Agent
-from .llm import LLM, LiteLLM
-from .config import Config
-from .session import save_session, load_session, list_sessions
-from .cron_scheduler import get_scheduler
-from .task import STATES, PRIORITIES
 from . import __version__
+from .agent import Agent
+from .config import Config
+from .cron_scheduler import get_scheduler
+from .llm import LLM, LiteLLM
+from .session import list_sessions, load_session, save_session
+from .task import PRIORITIES, STATES
 
 console = Console()
 
@@ -34,12 +34,26 @@ def _parse_args():
     p.add_argument("--demo", action="store_true", help="Run the offline scripted demo (no API key needed)")
     p.add_argument("-r", "--resume", metavar="ID", help="Resume a saved session")
     p.add_argument("--daemon", action="store_true", help="Run as a background task daemon: fires scheduled tasks with no interactive REPL")
+    p.add_argument("--tui", action="store_true", help="Launch the full-screen Textual TUI as the interactive layer (default is the classic REPL)")
     p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     return p.parse_args()
 
 
 def main():
     args = _parse_args()
+
+    if args.demo and args.tui:
+        # 离线验证 TUI:`--tui --demo` 用脚本化 LLM 自动播放真实 Agent loop
+        import tempfile
+        from pathlib import Path
+
+        from .demo import _script
+        from .llm import ScriptedLLM
+        from .tui import run_tui
+
+        workdir = Path(tempfile.mkdtemp(prefix="encoder-demo-"))
+        agent = Agent(llm=ScriptedLLM(_script(workdir)), memory_enabled=False)
+        raise SystemExit(run_tui(agent, Config.from_env(), demo=True))
 
     if args.demo:
         from .demo import run_demo
@@ -115,6 +129,11 @@ def main():
     if args.daemon:
         _daemon(agent)
         return
+
+    # full-screen Textual TUI interactive layer (default stays the classic REPL)
+    if args.tui:
+        from .tui import run_tui
+        raise SystemExit(run_tui(agent, config))
 
     # interactive REPL
     _repl(agent, config)

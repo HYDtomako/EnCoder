@@ -8,7 +8,7 @@ design_process和corecoder-note里有一些设计过程/学习心得
 
 ## 新增能力概览
 
-当前版本围绕“让 Agent 能持续推进复杂工作”增加了五组能力：
+当前版本围绕“让 Agent 能持续推进复杂工作”增加了六组能力：
 
 | 能力 | 解决的问题 | 持久化位置 |
 | --- | --- | --- |
@@ -17,8 +17,9 @@ design_process和corecoder-note里有一些设计过程/学习心得
 | Memory v2 | 如何保存、召回、更新和维护跨回合信息 | `.MEMORY/` |
 | Agent teammate | 如何让多个常驻 Agent 独立上下文并行协作 | `.Mailbox/`，可选 `.worktrees/` |
 | 定时触发器 | 如何按每日计划自动提交 Agent 请求 | `~/.encoder/tasks.json` |
+| 全屏 TUI | 如何在不改核心 Agent 的前提下提供面板化交互 | 无（纯交互层，`--tui` 启动） |
 
-此外新增了 Tavily 联网搜索和网页正文读取工具。所有新增工具都严格继承 `encoder/tools/base.py` 中的 `Tool` 基类，并把可恢复错误作为工具结果返回，不让单个工具异常打断主循环。
+此外新增了 Tavily 联网搜索和网页正文读取工具。所有新增工具都严格继承 `encoder/tools/base.py` 中的 `Tool` 基类，并把可恢复错误作为工具结果返回，不让单个工具异常打断主循环。TUI 交互层只做界面壳，核心 Agent、工具、记忆、任务、团队全部复用，零核心改动。
 
 ## Todo 与 Task
 
@@ -157,6 +158,42 @@ TAVILY_API_KEY=tvly-...
 /team release <name>            结束指定队友
 ```
 
+以上命令在经典 REPL 与全屏 TUI（`--tui`）中均可使用。
+
+## 全屏 TUI 交互层
+
+在既有 REPL 之外，新增一个基于 [Textual](https://github.com/Textualize/textual) 的**全屏 TUI 交互层**，配色取自 `tui_image/样式.png`（暖琥珀金 × 近黑炭灰）。它只是一个新的交互壳：核心 Agent、模型适配、工具、记忆、任务、团队系统全部复用，**零核心改动**。默认入口仍是经典 REPL，TUI 通过参数显式启用。
+
+```bash
+encoder --tui              # 全屏 TUI 界面（不带 --tui 时行为与以前完全一致）
+encoder --tui --demo       # 离线演示：无需 API key，脚本化 Agent 自动播放真实 Agent loop
+```
+
+界面构成（与样式图一一对应）：
+
+- **顶部标题栏**：左侧 `◆ EnCoder` 金标，右侧模型名与 base 地址；
+- **左侧对话主区**：顶部金色欢迎卡，用户消息带金标，工具调用显示为 `⚙ name(...)`，Agent 回复为内联 Markdown（粗体/斜体/行内代码/标题/代码块）；
+- **右侧状态侧栏**：顶部金色状态卡（运行状态 / 模型 / token 用量 / 记忆开关），下方 TASKS、MEMORY、TEAM、CRON 分节列表，每回合结束自动刷新；
+- **底部状态栏**：快捷键提示与运行状态，繁忙时金色 `● RUNNING…`。
+
+操作方式：
+
+```text
+Enter                发送
+Ctrl+J / Alt+Enter   换行
+Ctrl+C               中断当前回合（空闲时退出）
+/help                查看命令
+```
+
+设计要点：
+
+- **线程安全接入**：阻塞式 `Agent.chat` 在工作线程串行执行，`on_token`/`on_tool` 回调把事件放进线程安全队列，UI 定时批量渲染，纯 UI 侧新增，不侵入 Agent Loop；
+- **取消不杀线程**：`Ctrl+C` 置位取消标记，下一条回调抛出 `KeyboardInterrupt`，复用 `agent.chat` 已有的中断分支回填未答复的工具调用并整体回滚本回合，保证会话历史一致；
+- **后台定时任务**：复用现有调度器，TUI 空闲时自动触发到期任务、执行结果写入 `~/.encoder/tasks.log`，与 REPL/daemon 语义一致；
+- **退出清理**：退出时停止调度线程并释放 teammate，与 `cli.py` 的退出路径一致。
+
+新增依赖：`textual`（已写入 `requirements.txt` 与 `pyproject.toml`）。
+
 ## 配置项
 
 新增配置均可通过环境变量设置，也可以写入项目根目录的 `.env`：
@@ -189,15 +226,16 @@ TAVILY_API_KEY=tvly-...
 
 ## 验证
 
-新增能力分别有针对性测试，覆盖联网工具、记忆 v2、Todo/Task、Mailbox、队友状态机、并发和路径隔离。运行完整测试：
+新增能力分别有针对性测试，覆盖联网工具、记忆 v2、Todo/Task、Mailbox、队友状态机、并发、路径隔离，以及 TUI 层的渲染纯函数与命令面板（无头模式）。运行完整测试：
 
 ```bash
 pytest tests/ -q
 ```
 
-也可以运行静态检查和字节码编译：
+也可以运行静态检查和字节码编译，TUI 离线冒烟（无需 API key）：
 
 ```bash
 ruff check .
 python -m compileall encoder
+encoder --tui --demo
 ```

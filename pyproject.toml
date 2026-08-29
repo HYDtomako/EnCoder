@@ -12,6 +12,7 @@ dependencies = [
     "prompt-toolkit",
     "python-dotenv",
     "rich",
+    "textual",
     "litellm",
     "PyYAML",
 ]
