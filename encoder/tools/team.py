@@ -27,7 +27,11 @@ class SpawnTeammateTool(Tool):
         "Hand a task to a persistent teammate that runs it in parallel on its own "
         "thread and reports the result to your mailbox. Unlike a sub-agent, the "
         "teammate stays alive (idle) for more tasks or your review. Requires teammate "
-        "mode to be on. One task = one teammate; at most a handful run at once."
+        "mode to be on. One task = one teammate; at most a handful run at once. "
+        "In a git repo a code-editing teammate is isolated by default in its own "
+        ".worktrees/<name> branch; release it then call integrate_results to bring "
+        "its code back. Set worktree=false for research / read-only tasks that will "
+        "not change repo code."
     )
     parameters = {
         "type": "object",
@@ -42,7 +46,9 @@ class SpawnTeammateTool(Tool):
             },
             "worktree": {
                 "type": "boolean",
-                "description": "Isolate this teammate in a .git/worktree (optional)",
+                "description": "false = run this teammate directly in the current "
+                               "working directory (read-only/research); omit to "
+                               "follow the default (isolated for code teammates)",
             },
         },
         "required": [],
@@ -51,7 +57,7 @@ class SpawnTeammateTool(Tool):
     _parent_agent = None
 
     def execute(self, task_id: str | None = None, description: str | None = None,
-                worktree: bool = False) -> str:
+                worktree: bool | None = None) -> str:
         parent = self._parent_agent
         if parent is None:
             return "Error: team tools not initialized"
@@ -65,7 +71,12 @@ class SpawnTeammateTool(Tool):
         tid = teammate.current_task_id
         task = parent.tasks.get(tid)
         label = f' "{task.description}"' if task is not None else ""
-        return (f"Spawned teammate {teammate.name} for task [{tid}]{label} "
+        note = ""
+        if teammate._worktree and teammate._branch:
+            note = f" (isolated in worktree on branch {teammate._branch})"
+        elif teammate._wt_note:
+            note = f"\n{teammate._wt_note}"
+        return (f"Spawned teammate {teammate.name} for task [{tid}]{label}{note} "
                 f"(status: {teammate.status}). It runs in parallel and will report "
                 f"its result to your mailbox.")
 
@@ -179,3 +190,28 @@ class BroadcastNoticeTool(Tool):
             name = getattr(parent, "_agent_name", None)
             targets = mailbox.broadcast(content, from_=name or "?")
         return f"Broadcast to {len(targets)} agent(s): {targets}"
+
+
+class IntegrateResultsTool(Tool):
+    name = "integrate_results"
+    description = (
+        "Merge finished code teammates back into the current branch. Call this AFTER "
+        "you released the code teammates (release_teammate) and collected their "
+        "results. Non-conflicting branches are merged by git directly; if a genuine "
+        "merge conflict appears, a one-shot Integration Agent (better model, "
+        "ENCODER_INTEGRATION_MODEL) reconciles ONLY the conflicted files inside the "
+        "merge and finishes it, then reports to you. The merged files land in the "
+        "current branch's working tree for you to review and test before delivering."
+    )
+    parameters = {"type": "object", "properties": {}, "required": []}
+
+    _parent_agent = None
+
+    def execute(self) -> str:
+        parent = self._parent_agent
+        if parent is None:
+            return "Error: team tools not initialized"
+        team = getattr(parent, "team", None)
+        if team is None:
+            return _OFF_HINT
+        return team.integrate()

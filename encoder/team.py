@@ -172,7 +172,7 @@ class Teammate:
     """A persistent worker: its own ``Agent`` on its own thread, work/idle/ending."""
 
     def __init__(self, name: str, agent, mailbox: Mailbox, tasks,
-                 worktree: Path | None = None):
+                 worktree: Path | None = None, branch: str | None = None):
         self.name = name
         self.agent = agent
         self.mailbox = mailbox
@@ -181,6 +181,8 @@ class Teammate:
         self.thread: threading.Thread | None = None
         self.current_task_id: str | None = None
         self._worktree = str(worktree) if worktree else None
+        self._branch = branch                   # teammate/<name>_<suffix>
+        self._wt_note = None                    # isolation failure reason (spawn sets it)
         self._notices: list[str] = []           # broadcasts held for the next task
 
     def start(self) -> None:
@@ -217,6 +219,11 @@ class Teammate:
                 result = self.agent.chat(prompt)
             except Exception as e:
                 result = f"[teammate error] {e}"
+            # checkpoint any repo edits onto our own branch *while still work*,
+            # so an integrate() merge (which only touches idle/ending teammates)
+            # never races a mid-commit worktree.
+            try:
+                self._commit_work()
             finally:
                 self.status = "idle"
 
@@ -228,6 +235,32 @@ class Teammate:
                     "task_id": self.current_task_id, "content": result,
                 })
             self.current_task_id = None
+
+    def _commit_work(self) -> None:
+        """Deterministically commit this worktree teammate's edits onto its branch.
+
+        No-op when the teammate has no worktree (ran directly in the main cwd)
+        or when nothing changed. Best-effort: a commit failure must never break
+        the teammate loop -- the branch just stays ahead-of/main via git.
+        """
+        if not (self._worktree and self._branch):
+            return
+        try:
+            changed = subprocess.run(
+                ["git", "-C", self._worktree, "status", "--porcelain"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            ).stdout.strip()
+            if not changed:
+                return
+            subprocess.run(["git", "-C", self._worktree, "add", "-A"],
+                           check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-C", self._worktree, "commit", "-m",
+                 f"teammate {self.name}: work result"],
+                check=True, capture_output=True, text=True,
+            )
+        except Exception:
+            pass  # committing is best-effort
 
     def _task_prompt(self, msg: dict) -> str:
         content = msg.get("content", "")
@@ -260,7 +293,10 @@ class TeamManager:
                  worktrees: bool = False, max_teammates: int = TEAM_MAX,
                  team_model: str | None = None,
                  team_api_key: str | None = None,
-                 team_base_url: str | None = None):
+                 team_base_url: str | None = None,
+                 integration_model: str | None = None,
+                 integration_api_key: str | None = None,
+                 integration_base_url: str | None = None):
         self.lead = lead
         self.mailbox = Mailbox(base_dir)
         self.mailbox.register("Lead")
@@ -274,6 +310,12 @@ class TeamManager:
         self.team_api_key = team_api_key
         self.team_base_url = team_base_url
         self._teammate_llm = None
+        # optional dedicated Integration-Agent model (better model for merge
+        # conflict reconciliation); falls back to the teammate/Lead LLM chain
+        self.integration_model = integration_model
+        self.integration_api_key = integration_api_key
+        self.integration_base_url = integration_base_url
+        self._integration_llm = None
 
     # -- helpers --------------------------------------------------------------
 
@@ -312,33 +354,85 @@ class TeamManager:
             self._teammate_llm = lead_llm
         return self._teammate_llm
 
+    def _integration_llm_for(self):
+        """LLM for the one-shot Integration Agent (merge-conflict reconciler).
+
+        Uses ``ENCODER_INTEGRATION_MODEL`` when configured (a deliberately
+        better model for this role), otherwise the Lead's own LLM.
+        """
+        if self._integration_llm is not None:
+            return self._integration_llm
+        lead_llm = self.lead.llm
+        model = self.integration_model
+        if model and model != getattr(lead_llm, "model", model):
+            from .llm import LLM              # local import: avoid circular import
+            api_key = (self.integration_api_key
+                       or os.getenv("ENCODER_API_KEY")
+                       or os.getenv("OPENAI_API_KEY")
+                       or os.getenv("DEEPSEEK_API_KEY") or "")
+            base_url = (self.integration_base_url
+                        or os.getenv("OPENAI_BASE_URL")
+                        or os.getenv("ENCODER_BASE_URL"))
+            self._integration_llm = LLM(model=model, api_key=api_key, base_url=base_url)
+        else:
+            self._integration_llm = lead_llm
+        return self._integration_llm
+
     def _build_agent(self, tools):
         from .agent import Agent              # local import: avoid circular import
-        return Agent(
+        from .tools.bash import disable_confirmation  # local import: ditto
+        agent = Agent(
             llm=self._teammate_llm_for(),
             tools=tools,
             max_context_tokens=self.lead.context.max_tokens,
             max_rounds=self.lead.max_rounds,
             memory_enabled=False,             # teammates' own context is enough
         )
+        # an unattended teammate has no user who could approve a high-risk
+        # command, so its bash can never self-confirm (review.md Item 2)
+        disable_confirmation(agent.tools)
+        return agent
 
-    def _setup_worktree(self, name: str) -> Path | None:
-        """Create a .git/worktree for an isolated teammate; None on any failure."""
+    def _git(self, args, cwd=None) -> subprocess.CompletedProcess:
+        """Run a native git command (never through the bash tool)."""
         try:
-            wt = Path(".worktrees") / name
-            subprocess.run(
-                ["git", "worktree", "add", "-b", f"teammate/{name}", str(wt)],
-                check=True, capture_output=True, text=True,
+            return subprocess.run(
+                ["git", *args], cwd=cwd, capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
             )
-            return wt
-        except Exception:
-            return None                        # degrade: run in the main cwd
+        except FileNotFoundError:
+            return type("CP", (), {
+                "returncode": 127, "stdout": "", "stderr": "git: command not found",
+            })()
+
+    def _setup_worktree(self, name: str):
+        """Create an isolated worktree+branch for a teammate.
+
+        Returns ``(worktree_path, branch)`` on success, or ``None`` on failure
+        (caller must surface it -- isolation must never degrade silently).
+        A fresh ``teammate/<name>_<suffix>`` branch + ``.worktrees/<name>_<suffix>``
+        dir is created per spawn so a stale registration from a crashed session
+        cannot block the next spawn.
+        """
+        self._git(["worktree", "prune"])       # drop stale registrations
+        suffix = uuid.uuid4().hex[:6]
+        branch = f"teammate/{name}_{suffix}"
+        wt = Path(".worktrees") / f"{name}_{suffix}"
+        cp = self._git(["worktree", "add", "-b", branch, str(wt)])
+        if cp.returncode != 0:
+            return None
+        return wt, branch
 
     # -- spawn ----------------------------------------------------------------
 
     def spawn(self, task_id: str | None = None, description: str | None = None,
-              worktree: bool = False) -> Teammate:
-        """Assign a task to a new persistent teammate and start it in parallel."""
+              worktree: bool | None = None) -> Teammate:
+        """Assign a task to a new persistent teammate and start it in parallel.
+
+        ``worktree``: None = follow the manager default (``worktrees``), which
+        the CLI turns on by default so code-editing teammates are isolated.
+        Pass ``False`` for research / read-only tasks that won't touch the repo.
+        """
         from .tools.agent import clone_tools  # local import: avoid circular import
 
         with self._lock:
@@ -367,9 +461,27 @@ class TeamManager:
             agent = self._build_agent(clone_tools(self.lead, _TEAMMATE_EXCLUDE))
             agent._mailbox = self.mailbox      # so a teammate's broadcast_notice works
             agent._agent_name = name
-            wt = self._setup_worktree(name) if (self.worktrees or worktree) else None
 
-            teammate = Teammate(name, agent, self.mailbox, tasks, worktree=wt)
+            # isolation: manager default unless the caller overrides
+            want_wt = self.worktrees if worktree is None else worktree
+            wt, branch, wt_note = None, None, None
+            if want_wt:
+                created = self._setup_worktree(name)
+                if created is not None:
+                    wt, branch = created
+                else:
+                    # never a silent degrade: the spawn result tells the Lead
+                    # this teammate is NOT isolated (research tasks may be fine)
+                    wt_note = (
+                        "⚠ worktree isolation unavailable (not a git repo, or "
+                        "git worktree add failed) — this teammate is running "
+                        "WITHOUT isolation; if its task edits repo code, cancel "
+                        "it or run the task sequentially."
+                    )
+
+            teammate = Teammate(name, agent, self.mailbox, tasks,
+                                worktree=wt, branch=branch)
+            teammate._wt_note = wt_note
             teammate.current_task_id = task.task_id
             self._teammates[name] = teammate
             teammate.start()
@@ -410,6 +522,154 @@ class TeamManager:
     def broadcast(self, content: str) -> list[str]:
         """Lead broadcast to all teammates (and their inboxes)."""
         return self.mailbox.broadcast(content, from_="Lead")
+
+    # --------------------------------------------------------------------------- #
+    # integrate - merge released worktree teammates back into the current branch
+    # --------------------------------------------------------------------------- #
+
+    def _ahead_of_head(self, branch: str) -> int:
+        """How many commits ``branch`` has that the current HEAD does not."""
+        cp = self._git(["rev-list", "--count", f"HEAD..{branch}"])
+        try:
+            return int((cp.stdout or "").strip() or 0)
+        except ValueError:
+            return 0
+
+    def _discard_teammate(self, t: Teammate) -> None:
+        """Remove a merged/cleaned teammate's worktree+branch and drop it from the map."""
+        try:
+            if t._worktree:
+                self._git(["worktree", "remove", "--force", t._worktree])
+                self._git(["branch", "-D", t._branch])
+        finally:
+            self._teammates.pop(t.name, None)
+
+    def _integration_agent(self):
+        from .agent import Agent              # local import: avoid circular import
+        from .tools.agent import clone_tools  # local import: avoid circular import
+        from .tools.bash import disable_confirmation  # local import: ditto
+        agent = Agent(
+            llm=self._integration_llm_for(),
+            tools=clone_tools(self.lead, _TEAMMATE_EXCLUDE),
+            max_context_tokens=self.lead.context.max_tokens,
+            max_rounds=self.lead.max_rounds,
+            memory_enabled=False,
+        )
+        disable_confirmation(agent.tools)     # headless: cannot confirm risky bash
+        return agent
+
+    def _resolve_conflict(self, t: Teammate, files: list[str]) -> str:
+        """Run the one-shot Integration Agent to reconcile ``t``'s in-progress merge.
+
+        The repo is mid-``git merge`` on ``t``'s branch. The agent must rewrite
+        only the conflicted files, ``git add`` them, and ``git merge --continue``;
+        then it runs the project tests and reports. Returns its report text.
+        """
+        task_result = ""
+        if t.current_task_id:
+            try:
+                task = self.lead.tasks.get(t.current_task_id)
+                task_result = getattr(task, "result", "") or ""
+            except Exception:
+                task_result = ""
+        task_result = task_result[:_RESULT_TRIM] if task_result else "(none)"
+
+        file_list = "\n".join(f"- {f}" for f in files) or "(none)"
+        prompt = f"""\
+The repository is mid-merge: branch {t._branch} (teammate {t.name}) is being \
+merged into the current branch and the merge has genuine content conflicts. Other \
+branches already merged cleanly are done -- do not touch them.
+
+Conflicted files (resolve ONLY these, they currently contain <<<<<<< HEAD / \
+======= / >>>>>>> {t._branch} markers):
+{file_list}
+
+You are the Integration Agent. Your job is to RECONCILE, not to pick one side.
+1. Read each conflicted file. Understand both intents -- you may inspect either
+   side: git show HEAD:<file>, git show {t._branch}:<file>, git log, git diff.
+2. Rewrite each conflicted file into one coherent, correct merged version and
+   remove all conflict markers. Respect both sides' real changes.
+3. Touch ONLY the conflicted files above. Do NOT run `git add .`
+4. git add each resolved file by its exact path.
+5. Finish the merge: git merge --continue --no-edit
+6. Run the project's tests (python -m pytest, or the project's command) and
+   report what you reconciled per file, that the merge finished, and whether the
+   tests pass.
+
+If any conflict is genuinely ambiguous, do NOT force it: keep the markers, do not
+continue the merge, and clearly explain what is ambiguous.
+
+Teammate {t.name}'s own summary of this work (context on its intent):
+{task_result}
+"""
+        try:
+            agent = self._integration_agent()
+            return agent.chat(prompt)
+        except Exception as e:
+            return f"[integrator error] {e}"
+
+    def integrate(self) -> str:
+        """Merge released (ending) worktree teammates back into the current branch.
+
+        Deterministic git merges first; only a *genuine* merge conflict triggers
+        the one-shot Integration Agent, which reconciles the conflicted files
+        inside the merge and finishes it. Merged teammates' worktrees are removed.
+        Returns a summary the Lead reviews before deciding final delivery.
+        """
+        candidates = [t for t in list(self._teammates.values())
+                      if t.status == "ending" and t._worktree and t._branch]
+        if not candidates:
+            return ("(integrate_results) no released code teammates to merge. "
+                    "Release a finished worktree teammate (release_teammate) "
+                    "before integrating; idle teammates keep their worktrees.")
+
+        lines: list[str] = []
+        for t in candidates:
+            t._commit_work()                       # best-effort final checkpoint
+            if self._ahead_of_head(t._branch) == 0:
+                self._discard_teammate(t)
+                lines.append(f"- {t.name}: no repo changes to merge; worktree cleaned")
+                continue
+
+            cp = self._git(["merge", "--no-edit", t._branch])
+            if cp.returncode == 0:
+                stat = self._git(["show", "--stat", "--oneline", "HEAD"]).stdout.strip()
+                self._discard_teammate(t)
+                head = stat.splitlines()[0][:80] if stat else "merged"
+                lines.append(f"- {t.name} ({t._branch}): merged cleanly → {head}")
+                continue
+
+            in_merge = (self._git(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+                        .returncode == 0)
+            if not in_merge:
+                # refused, not a conflict: the current branch has local changes
+                self._git(["merge", "--abort"])    # no-op, keeps the tree untouched
+                lines.append(
+                    f"- {t.name} ({t._branch}): NOT merged — the current branch "
+                    "working tree has uncommitted changes that block the merge. "
+                    "Commit/stash them, then call integrate_results again.")
+                continue
+
+            # genuine conflict -> Integration Agent reconciles inside the merge
+            files = [f for f in self._git(
+                ["diff", "--name-only", "--diff-filter=U"]).stdout.splitlines() if f]
+            report = (self._resolve_conflict(t, files) or "").strip()
+            still_merging = (self._git(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+                             .returncode == 0)
+            if still_merging:
+                self._git(["merge", "--abort"])    # integrator did not finish
+                lines.append(
+                    f"- {t.name} ({t._branch}): conflict NOT resolved by the "
+                    "Integration Agent; merge aborted (files/branch kept for manual "
+                    f"handling).\n    integrator: {report[:_RESULT_TRIM]}")
+            else:
+                self._discard_teammate(t)
+                lines.append(
+                    f"- {t.name} ({t._branch}): conflicted → reconciled by the "
+                    f"Integration Agent and merged.\n    {report[:_RESULT_TRIM]}")
+
+        header = "# integrate_results（已把 release 的代码 teammate 归并进当前分支）"
+        return "\n".join([header] + lines)
 
     def render_summary(self, results: list[dict], statuses: list[dict]) -> str:
         """Deterministic '队友结果摘要' block (not LLM-generated)."""

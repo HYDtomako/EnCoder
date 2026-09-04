@@ -100,7 +100,7 @@ class CommandRunner:
             "  /crontab    定时任务\n"
             "  /memory     记忆列表 / show / forget / organize / resolve / on / off\n"
             "  /task       任务:list / show <id> / update <id> <state|priority> / archive <root_id> / clear\n"
-            "  /team       teammate:status / on / off / release <name>\n"
+            "  /team       teammate:status / on / off / release <name> / integrate\n"
             "  quit        退出\n"
             "\n"
             "◆ 输入\n"
@@ -336,12 +336,17 @@ class CommandRunner:
                 from ..team import TeamManager
 
                 agent.team = TeamManager(
-                    lead=agent, worktrees=False, max_teammates=3,
+                    lead=agent, worktrees=agent.team_worktrees, max_teammates=3,
                     team_model=agent.team_model, team_api_key=agent.team_api_key,
                     team_base_url=agent.team_base_url,
+                    integration_model=agent.integration_model,
+                    integration_api_key=agent.integration_api_key,
+                    integration_base_url=agent.integration_base_url,
                 )
                 agent.team_enabled = True
-            txt = ("Teammate 模式已开启。你是 Lead;teammate 是常驻协作者。")
+            iso = "开" if agent.team.worktrees else "关"
+            txt = (f"Teammate 模式已开启。你是 Lead;teammate 是常驻协作者"
+                   f"(worktree 默认隔离:{iso},代码改动经 integrate_results 归并)。")
             return CommandResult(lines=[Text(txt, style=SUCCESS)])
         if cmd == "off":
             team = agent.team
@@ -359,6 +364,11 @@ class CommandRunner:
             if agent.team.release(name):
                 return CommandResult(lines=[Text(f"已结束 {name}。", style=SUCCESS)])
             return CommandResult(lines=[Text(f"不存在名为 '{name}' 的 teammate。", style=WARNING)])
+        if cmd == "integrate":
+            if agent.team is None:
+                return CommandResult(lines=[Text("Teammate 模式未开启。", style=WARNING)])
+            out = agent.team.integrate()
+            return CommandResult(lines=[Text(out, style=TEXT)])
 
         if agent.team is None:
             return CommandResult(lines=[Text("Teammate 模式关闭。开启: /team on(由你决定,"

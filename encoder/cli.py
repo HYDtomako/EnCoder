@@ -104,6 +104,9 @@ def main():
         team_model=config.team_model,
         team_api_key=config.team_api_key,
         team_base_url=config.team_base_url,
+        integration_model=config.integration_model,
+        integration_api_key=config.integration_api_key,
+        integration_base_url=config.integration_base_url,
     )
 
     # resume saved session
@@ -590,14 +593,21 @@ def _cmd_team(agent: Agent, user_input: str):
         if agent.team is None:
             # teammate mode was off at construction; build the manager now
             from .team import TeamManager
-            agent.team = TeamManager(lead=agent, worktrees=False,
+            agent.team = TeamManager(lead=agent,
+                                     worktrees=agent.team_worktrees,
                                      max_teammates=3,
                                      team_model=agent.team_model,
                                      team_api_key=agent.team_api_key,
-                                     team_base_url=agent.team_base_url)
+                                     team_base_url=agent.team_base_url,
+                                     integration_model=agent.integration_model,
+                                     integration_api_key=agent.integration_api_key,
+                                     integration_base_url=agent.integration_base_url)
             agent.team_enabled = True
-        console.print("[green]Teammate mode on. You are the Lead; teammates "
-                      "are persistent workers.[/green]")
+        isolated = "on" if agent.team.worktrees else "off"
+        console.print(f"[green]Teammate mode on. You are the Lead; teammates "
+                      f"are persistent workers (default worktree isolation: "
+                      f"{isolated} — code-editing teammates run in a .worktrees/"
+                      f" branch and come back via integrate_results).[/green]")
         return
 
     if cmd == "off":
@@ -621,6 +631,21 @@ def _cmd_team(agent: Agent, user_input: str):
             console.print(f"[green]Sent end to {name}.[/green]")
         else:
             console.print(f"[yellow]No teammate named '{name}'.[/yellow]")
+        return
+
+    if cmd == "integrate":
+        if team is None:
+            console.print("[yellow]Teammate mode is off.[/yellow]")
+            return
+        console.print("[dim]Merging released worktree teammates into the current "
+                      "branch... (a genuine conflict will start the Integration "
+                      "Agent)[/dim]")
+        try:
+            out = team.integrate()
+        except Exception as e:
+            console.print(f"[red]integrate error: {e}[/red]")
+            return
+        console.print(out)
         return
 
     # default: status
@@ -665,6 +690,7 @@ def _show_help():
         "  /task          List tasks; /task show <id> | update <id> <state|priority>\n"
         "                 /task archive <root_id> | clear\n"
         "  /team          Teammate mode: status | on | off | release <name>\n"
+        "                 /team integrate   Merge released worktree teammates back\n"
         "  quit           Exit Encoder\n"
         "\n"
         "[bold]Input:[/bold]\n"

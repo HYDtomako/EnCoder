@@ -34,6 +34,7 @@ def spawn_subagent(parent, task: str) -> str:
     """
     # import here to avoid a circular import at module load time
     from ..agent import Agent
+    from .bash import disable_confirmation
 
     sub = Agent(
         llm=parent.llm,
@@ -41,6 +42,9 @@ def spawn_subagent(parent, task: str) -> str:
         max_context_tokens=parent.context.max_tokens,
         max_rounds=20,
     )
+    # headless: a sub-agent has no interactive user, so it cannot confirm a
+    # high-risk command itself (review.md Item 2)
+    disable_confirmation(sub.tools)
     result = sub.chat(task)
     # trim long results to avoid blowing up parent's context
     if len(result) > 5000:

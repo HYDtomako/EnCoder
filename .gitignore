@@ -8,3 +8,7 @@ __pycache__/
 .idea/
 .cladue
 encoder.egg-info
+# runtime state written by the agent must never be tracked
+.worktrees/
+.Mailbox/
+.TASK/
