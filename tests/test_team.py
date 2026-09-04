@@ -7,6 +7,7 @@ hint. Teammates run real threads but against a fake offline LLM.
 """
 
 import os
+import subprocess
 import time
 
 import pytest
@@ -14,7 +15,7 @@ import pytest
 from encoder.context import ContextManager
 from encoder.llm import LLMResponse
 from encoder.task import TaskManager
-from encoder.team import TEAM_MAX, Mailbox, TeamManager
+from encoder.team import TEAM_MAX, Mailbox, TeamManager, Teammate
 from encoder.tools import ALL_TOOLS
 from encoder.tools.paths import resolve, set_cwd, set_root
 
@@ -294,3 +295,114 @@ def test_bash_cd_refuses_escape_from_root(tmp_path):
     finally:
         set_root(None)
         bash_mod._local.cwd = None
+
+
+# --------------------------------------------------------------------------- #
+# worktree merge / integrate closed loop (review.md Item 1)
+# --------------------------------------------------------------------------- #
+# Every test below chdirs into a throwaway git repo so no git worktree is ever
+# created inside the real project checkout.
+
+def _git(repo, *args) -> str:
+    cp = subprocess.run(["git", *args], cwd=repo, capture_output=True,
+                        text=True, encoding="utf-8", errors="replace")
+    assert cp.returncode == 0, cp.stderr
+    return cp.stdout.strip()
+
+
+@pytest.fixture
+def git_repo(tmp_path, monkeypatch):
+    """A tiny throwaway git repo, and the process chdirs into it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@encoder")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "core.autocrlf", "false")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    monkeypatch.chdir(repo)
+    return repo
+
+
+def _wt_teammate(team, lead, name, files: dict[str, str], seed: str) -> Teammate:
+    """Create an already-finished (ending) worktree teammate with a committed edit."""
+    wt, branch = team._setup_worktree(name)
+    assert wt is not None, "worktree should be creatable inside the throwaway repo"
+    for rel, text in files.items():
+        p = wt / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-qm", f"{name}: {seed}")
+    t = Teammate(name, None, team.mailbox, lead.tasks, worktree=wt, branch=branch)
+    t.status = "ending"                    # released, so integrate will merge it
+    team._teammates[name] = t
+    return t
+
+
+def test_integrate_merges_disjoint_branches_and_cleans(git_repo):
+    team, lead = _team(git_repo)
+    team.worktrees = True
+    _wt_teammate(team, lead, "agent_1", {"a.txt": "A one\n"}, "feature-a")
+    _wt_teammate(team, lead, "agent_2", {"b.txt": "B two\n"}, "feature-b")
+
+    out = team.integrate()
+
+    # both edits are now on the current branch working tree
+    assert (git_repo / "a.txt").read_text(encoding="utf-8") == "A one\n"
+    assert (git_repo / "b.txt").read_text(encoding="utf-8") == "B two\n"
+    assert "merged cleanly" in out
+    # teammates dropped, branches gone, no leftover teammate worktrees
+    assert team.status() == []
+    assert _git(git_repo, "branch", "--list", "teammate/*") == ""
+    wt_entries = _git(git_repo, "worktree", "list")
+    assert ".worktrees" not in wt_entries
+
+
+def test_integrate_conflict_kept_for_manual_when_integrator_cannot_finish(git_repo):
+    """Add/add conflict: FakeLLM 'integrator' can't edit, so the merge aborts and
+    the teammate/worktree are kept for manual handling instead of being lost."""
+    team, lead = _team(git_repo)
+    team.worktrees = True
+    _wt_teammate(team, lead, "agent_1", {"c.txt": "one\n"}, "c1")
+    _wt_teammate(team, lead, "agent_2", {"c.txt": "two\n"}, "c2")
+
+    out = team.integrate()
+
+    # agent_1 merged cleanly; agent_2's add/add conflict was NOT auto-resolved
+    assert "conflict NOT resolved" in out
+    # repo returned to a clean state (HEAD content), no in-progress merge
+    no_merge = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                              cwd=git_repo, capture_output=True)
+    assert no_merge.returncode != 0            # MERGE_HEAD must not exist
+    assert (git_repo / "c.txt").read_text(encoding="utf-8") == "one\n"
+    # agent_2 retained (branch + worktree) for the Lead to handle manually
+    names = [s["name"] for s in team.status()]
+    assert "agent_2" in names
+    assert "agent_1" not in names
+    assert _git(git_repo, "branch", "--list", "teammate/agent_2*") != ""
+
+
+def test_integrate_no_released_teammates_returns_hint(git_repo):
+    team, _ = _team(git_repo)
+    out = team.integrate()
+    assert "no released code teammates" in out
+
+
+def test_worktree_creation_failure_is_loud_not_silent(tmp_path, monkeypatch):
+    """When isolation is requested but impossible (not a git repo), spawn must
+    say so instead of silently degrading back into the main working directory."""
+    monkeypatch.chdir(tmp_path)              # tmp_path is NOT a git repo
+    (tmp_path / "loose.txt").write_text("hi\n", encoding="utf-8")
+    team, lead = _team(tmp_path)
+    team.worktrees = True
+
+    t = team.spawn(description="research only")
+    assert t._worktree is None
+    assert t._wt_note is not None
+    assert "WITHOUT isolation" in t._wt_note
+
+    team.release(t.name)
+    assert _wait_for(lambda: t.status == "ending")

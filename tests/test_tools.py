@@ -7,8 +7,8 @@ from encoder.tools import ALL_TOOLS, get_tool
 
 
 def test_tool_count():
-    # 7 base + 3 crontab + 2 web + 3 todo + 5 task + 5 team tools
-    assert len(ALL_TOOLS) == 25
+    # 7 base + 3 crontab + 2 web + 3 todo + 5 task + 5 team tools + 1 integrate
+    assert len(ALL_TOOLS) == 26
 
 
 def test_all_tools_have_valid_schema():
@@ -136,6 +136,101 @@ def test_bash_truncates_long_output():
     bash = get_tool("bash")
     r = bash.execute(command=f'"{sys.executable}" -c "print(\'x\' * 20000)"')
     assert "truncated" in r
+
+
+# --- layered safety (review.md Item 2) ---
+
+def test_bash_blocks_windows_drive_wipe():
+    """del/rd/rmdir /s on a drive root and `format` are never confirmable."""
+    bash = get_tool("bash")
+    for cmd in [
+        r"del /s /q C:\\",
+        r"rd /s /q D:\\data",
+        r"rmdir /s /q C:\\",
+        "format C:",
+    ]:
+        assert "Blocked" in bash.execute(command=cmd), cmd
+
+
+def test_bash_blocks_git_clean_fdx():
+    """git clean that also deletes ignored files (venv/worktrees) is blocked."""
+    bash = get_tool("bash")
+    for cmd in [
+        "git clean -fdx",
+        "git clean -xdf",
+        "git clean -fd -x",
+        "git clean --force --ignored -d",
+    ]:
+        assert "Blocked" in bash.execute(command=cmd), cmd
+
+
+def test_bash_risky_refuses_without_confirm(tmp_path):
+    """A risky-but-sometimes-legit command must not run until confirm=true."""
+    bash = get_tool("bash")
+    marker = tmp_path / "ran.txt"
+    cmd = f'echo "git push --force --dry-run" > "{marker}"'
+    r = bash.execute(command=cmd)
+    assert "Needs your confirmation" in r
+    assert not marker.exists(), "command must NOT run without confirm"
+
+
+def test_bash_risky_runs_with_confirm(tmp_path):
+    bash = get_tool("bash")
+    marker = tmp_path / "ran.txt"
+    cmd = f'echo "git push --force --dry-run" > "{marker}"'
+    r = bash.execute(command=cmd, confirm=True)
+    assert "Needs your confirmation" not in r
+    assert marker.exists(), "command should run once confirmed"
+
+
+def test_bash_risky_refused_for_unattended_agent(tmp_path):
+    """Teammate/sub-agent bash can never self-confirm (no interactive user)."""
+    import encoder.tools.bash as bash_mod
+
+    bash = bash_mod.BashTool()
+    bash_mod.disable_confirmation([bash])
+    assert bash.can_confirm is False
+    marker = tmp_path / "ran.txt"
+    cmd = f'echo "git push --force --dry-run" > "{marker}"'
+    r = bash.execute(command=cmd, confirm=True)
+    assert "Refused" in r
+    assert not marker.exists(), "unattended agent must not approve risky commands"
+
+
+def test_bash_risky_reset_hard_refused(tmp_path):
+    bash = get_tool("bash")
+    marker = tmp_path / "ran.txt"
+    # an actually-harmless marker write, but the command line is flagged risky
+    cmd = f'echo "git reset --hard HEAD" > "{marker}"'
+    r = bash.execute(command=cmd)
+    assert "Needs your confirmation" in r
+    assert not marker.exists()
+
+
+def test_bash_blocks_redirect_outside_root(tmp_path):
+    """A confined (worktree) agent must not write to an absolute path outside it."""
+    from encoder.tools.paths import set_root
+
+    outside = tmp_path.parent / "outside.txt"
+    inside = tmp_path / "ok.txt"
+    set_root(str(tmp_path))
+    try:
+        bash = get_tool("bash")
+        for cmd in (
+            f'echo hi > "{outside}"',
+            f'echo hi >> "{outside}"',
+            f'rm -f {outside}',
+            f'mv {inside} {outside}',
+        ):
+            r = bash.execute(command=cmd)
+            assert "writes outside this teammate's worktree root" in r, cmd
+        assert not outside.exists()
+        # a write inside the root is allowed
+        r = bash.execute(command=f'echo hi > "{inside}"')
+        assert "Blocked" not in r
+        assert inside.exists()
+    finally:
+        set_root(None)
 
 
 # --- read_file ---

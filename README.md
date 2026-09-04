@@ -112,13 +112,15 @@ teammate 与一次性 sub-agent 的区别是生命周期和通信方式：
 
 Mailbox 支持五类消息：`task`、`review`、`end`、`result` 和 `notice`。消息按 `end`、`review`、`task`、`notice` 的顺序消费，因此 Lead 的 review 会优先于排队的新任务。队友完成后的结果会写入 `.Mailbox/Lead.json`，Lead 下一次请求时读取并清空，避免重复注入。
 
-当并行修改存在文件冲突风险时，可以为队友启用 Git worktree 隔离；worktree 不可用时会降级到当前工作目录，不会因此让 Lead 主流程崩溃。队友拥有独立的 context 和工具实例，但不会继承 `agent`、`dispatch_task` 及团队管理工具，防止递归派发和共享可变工具状态污染。
+会改 repo 代码的 teammate 默认在其独立的 Git worktree（分支 `teammate/<name>_…`）里运行，并在每个工作轮结束自动 commit 到自己的分支；只有研究/只读任务才由 Lead 显式传 `worktree=false` 关闭隔离。worktree 建失败时返回**明确提示“该 teammate 未隔离运行”**（不再静默降级回主目录）。队友拥有独立的 context 和工具实例，但不会继承 `agent`、`dispatch_task` 及团队管理工具，防止递归派发和共享可变工具状态污染。
+
+teammate 完成并 `release_teammate` 后，Lead 调用 `integrate_results` 把其分支归并回当前分支：无冲突的分支由 git 直接合并；**只有真冲突时**才启动一个一次性的 Integration Agent（更优模型，`ENCODER_INTEGRATION_MODEL`）——它读懂双方意图、只重写冲突文件、完成归并并跑测试，再把报告交回 Lead 审阅，Lead 验证后才交付。归并完成的 teammate 其 `.worktrees/` 目录与分支会被自动清理。
 
 新增团队工具包括：
 
 ```text
 spawn_teammate       collect_results       review_teammate
-release_teammate     broadcast_notice
+release_teammate     broadcast_notice     integrate_results
 ```
 
 ## 联网工具
@@ -156,6 +158,7 @@ TAVILY_API_KEY=tvly-...
 /team                           查看队友状态
 /team on | off                  开关 teammate 模式
 /team release <name>            结束指定队友
+/team integrate                 把已 release 的代码 teammate 归并回当前分支
 ```
 
 以上命令在经典 REPL 与全屏 TUI（`--tui`）中均可使用。
@@ -204,12 +207,15 @@ Ctrl+C               中断当前回合（空闲时退出）
 | `ENCODER_MEMORY_LLM` | 主模型 | 记忆语义判断使用的低成本模型 |
 | `ENCODER_TEAM_ENABLED` | `0` | 是否启用 teammate 模式 |
 | `ENCODER_TEAM_MAX` | `3` | 最大并行 teammate 数量 |
-| `ENCODER_TEAM_WORKTREES` | `0` | 是否默认尝试 Git worktree 隔离 |
+| `ENCODER_TEAM_WORKTREES` | `1` | 是否默认用 Git worktree 隔离改代码的 teammate |
 | `ENCODER_TEAM_MODEL` | 主模型 | teammate 使用的模型 |
 | `ENCODER_TEAM_API_KEY` | 主 API key | teammate 专用 API key |
 | `ENCODER_TEAM_BASE_URL` | 主 base URL | teammate 专用 API 地址 |
+| `ENCODER_INTEGRATION_MODEL` | 主模型 | 归并冲突时 Integration Agent 用的模型（可配更优模型） |
+| `ENCODER_INTEGRATION_API_KEY` | 主 API key | Integration Agent 专用 API key |
+| `ENCODER_INTEGRATION_BASE_URL` | 主 base URL | Integration Agent 专用 API 地址 |
 
-记忆系统和团队系统都以“失败可降级”为原则：低成本模型不可用时记忆回退到关键词路径，Mailbox 或 worktree 操作失败时保留主流程，队友异常会记录到任务和结果消息中。
+记忆系统和团队系统都以“失败可降级”为原则：低成本模型不可用时记忆回退到关键词路径，Mailbox 操作失败保留主流程，队友异常会记录到任务和结果消息中。例外：请求了 worktree 隔离但创建失败时**不会静默降级**——会明确提示“该 teammate 未隔离运行”，由 Lead 判断是否继续。
 
 ## 项目数据目录的边界
 

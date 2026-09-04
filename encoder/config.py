@@ -37,11 +37,14 @@ class Config:
     memory_enabled: bool = True
     memory_llm: str | None = None
     team_enabled: bool = False
-    team_worktrees: bool = False
+    team_worktrees: bool = True           # isolate code-editing teammates by default
     team_max: int = 3
     team_model: str | None = None
     team_api_key: str | None = None
     team_base_url: str | None = None
+    integration_model: str | None = None  # better model for merge-conflict reconciling
+    integration_api_key: str | None = None
+    integration_base_url: str | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -65,9 +68,12 @@ class Config:
             memory_llm=os.getenv("ENCODER_MEMORY_LLM") or None,
             provider=os.getenv("ENCODER_PROVIDER", "openai"),
             team_enabled=os.getenv("ENCODER_TEAM_ENABLED", "0") == "1",
-            team_worktrees=os.getenv("ENCODER_TEAM_WORKTREES", "0") == "1",
+            team_worktrees=os.getenv("ENCODER_TEAM_WORKTREES", "1") != "0",
             team_max=int(os.getenv("ENCODER_TEAM_MAX", "3")),
             team_model=os.getenv("ENCODER_TEAM_MODEL") or None,
             team_api_key=os.getenv("ENCODER_TEAM_API_KEY") or None,
             team_base_url=os.getenv("ENCODER_TEAM_BASE_URL") or None,
+            integration_model=os.getenv("ENCODER_INTEGRATION_MODEL") or None,
+            integration_api_key=os.getenv("ENCODER_INTEGRATION_API_KEY") or None,
+            integration_base_url=os.getenv("ENCODER_INTEGRATION_BASE_URL") or None,
         )

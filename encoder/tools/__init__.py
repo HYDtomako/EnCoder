@@ -12,7 +12,7 @@ from .web_search import WebSearchTool
 from .web_fetch import WebFetchTool
 from .todo import CreateTodoTool, UpdateTodoTool, ListTodosTool
 from .task import CreateTaskTool, ListTasksTool, UpdateTaskTool, DispatchTaskTool, ArchiveTasksTool
-from .team import SpawnTeammateTool, CollectResultsTool, ReviewTeammateTool, ReleaseTeammateTool, BroadcastNoticeTool
+from .team import SpawnTeammateTool, CollectResultsTool, ReviewTeammateTool, ReleaseTeammateTool, BroadcastNoticeTool, IntegrateResultsTool
 
 ALL_TOOLS = [
     BashTool(),
@@ -40,6 +40,7 @@ ALL_TOOLS = [
     ReviewTeammateTool(),
     ReleaseTeammateTool(),
     BroadcastNoticeTool(),
+    IntegrateResultsTool(),
 ]
 
 

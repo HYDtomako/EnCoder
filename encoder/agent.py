@@ -21,7 +21,7 @@ from .tools.task import (
 )
 from .tools.team import (
     SpawnTeammateTool, CollectResultsTool, ReviewTeammateTool,
-    ReleaseTeammateTool, BroadcastNoticeTool,
+    ReleaseTeammateTool, BroadcastNoticeTool, IntegrateResultsTool,
 )
 from .prompt import system_prompt
 from .context import ContextManager
@@ -40,11 +40,14 @@ class Agent:
         memory_enabled: bool = True,
         memory_llm: str | None = None,
         team_enabled: bool = False,
-        team_worktrees: bool = False,
+        team_worktrees: bool = True,
         team_max: int = 3,
         team_model: str | None = None,
         team_api_key: str | None = None,
         team_base_url: str | None = None,
+        integration_model: str | None = None,
+        integration_api_key: str | None = None,
+        integration_base_url: str | None = None,
     ):
         self.llm = llm
         self.tools = tools if tools is not None else ALL_TOOLS
@@ -69,7 +72,7 @@ class Agent:
                          CreateTaskTool, ListTasksTool, UpdateTaskTool,
                          DispatchTaskTool, ArchiveTasksTool,
                          SpawnTeammateTool, CollectResultsTool, ReviewTeammateTool,
-                         ReleaseTeammateTool, BroadcastNoticeTool)
+                         ReleaseTeammateTool, BroadcastNoticeTool, IntegrateResultsTool)
         for t in self.tools:
             if isinstance(t, _PARENT_TOOLS):
                 t._parent_agent = self
@@ -84,14 +87,22 @@ class Agent:
 
         # multi-agent team (add3.0): OFF by default - only the user enables it
         self.team_enabled = team_enabled
+        self.team_worktrees = team_worktrees   # default isolation for code teammates
         self.team_model = team_model
         self.team_api_key = team_api_key
         self.team_base_url = team_base_url
+        self.integration_model = integration_model
+        self.integration_api_key = integration_api_key
+        self.integration_base_url = integration_base_url
         self.team = (TeamManager(lead=self, worktrees=team_worktrees,
                                  max_teammates=team_max,
                                  team_model=team_model,
                                  team_api_key=team_api_key,
-                                 team_base_url=team_base_url) if team_enabled else None)
+                                 team_base_url=team_base_url,
+                                 integration_model=integration_model,
+                                 integration_api_key=integration_api_key,
+                                 integration_base_url=integration_base_url)
+                     if team_enabled else None)
 
     def _full_messages(self) -> list[dict]:
         return [{"role": "system", "content": self._system}] + self.messages
