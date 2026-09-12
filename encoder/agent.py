@@ -23,6 +23,7 @@ from .tools.team import (
     SpawnTeammateTool, CollectResultsTool, ReviewTeammateTool,
     ReleaseTeammateTool, BroadcastNoticeTool, IntegrateResultsTool,
 )
+from .tools.checkpoint import CheckpointTool
 from .prompt import system_prompt
 from .context import ContextManager
 from .task import TodoList, TaskManager
@@ -48,6 +49,10 @@ class Agent:
         integration_model: str | None = None,
         integration_api_key: str | None = None,
         integration_base_url: str | None = None,
+        checkpoint_enabled: bool = False,
+        checkpoint_dir: str | None = None,
+        checkpoint_keep: int = 10,
+        checkpoint_max: int = 50,
     ):
         self.llm = llm
         self.tools = tools if tools is not None else ALL_TOOLS
@@ -72,7 +77,8 @@ class Agent:
                          CreateTaskTool, ListTasksTool, UpdateTaskTool,
                          DispatchTaskTool, ArchiveTasksTool,
                          SpawnTeammateTool, CollectResultsTool, ReviewTeammateTool,
-                         ReleaseTeammateTool, BroadcastNoticeTool, IntegrateResultsTool)
+                         ReleaseTeammateTool, BroadcastNoticeTool, IntegrateResultsTool,
+                         CheckpointTool)
         for t in self.tools:
             if isinstance(t, _PARENT_TOOLS):
                 t._parent_agent = self
@@ -104,6 +110,29 @@ class Agent:
                                  integration_base_url=integration_base_url)
                      if team_enabled else None)
 
+        # checkpoint / breakpoint recovery (design_ckeckpoint.md): OFF by default,
+        # and deliberately opt-in per Agent -- TeamManager builds a fresh Agent
+        # per teammate (team.py:_build_agent), and those must not each open their
+        # own .CHECKPOINT/ dir. Only the Lead the user is talking to checkpoints.
+        self.checkpoints = None
+        if checkpoint_enabled:
+            from .checkpoint import BASE_DIRNAME, CheckpointManager
+            self.checkpoints = CheckpointManager(
+                agent=self,
+                base_dir=checkpoint_dir or BASE_DIRNAME,
+                keep=checkpoint_keep,
+                max_checkpoints=checkpoint_max,
+                llm=self.llm,
+            )
+            # observation hooks: the state itself is read from disk when a
+            # snapshot is taken, so these events are the trail, not the truth
+            self.todos.on_change = self._on_todo_change
+            self.tasks.on_change = self._on_task_change
+            if self.team is not None:
+                self.team.on_event = self._on_team_event
+            self.checkpoints.record("session_start", actor="system",
+                                    name=self.checkpoints.session_id)
+
     def _full_messages(self) -> list[dict]:
         return [{"role": "system", "content": self._system}] + self.messages
 
@@ -131,14 +160,19 @@ class Agent:
             summary = self.team.render_summary(self.team.collect(), self.team.status())
             if summary:
                 prelude.append(summary)
+        # a restored checkpoint's handoff note rides in the same channel: the
+        # recovered agent must re-orient before working, so it is assembled from
+        # the snapshot at restore time and consumed here, exactly once.
+        if self.checkpoints is not None:
+            handoff = self.checkpoints.take_handoff()
+            if handoff:
+                prelude.insert(0, handoff)
         if prelude:
             user_input = "\n\n".join(prelude + [user_input])
 
         self.messages.append({"role": "user", "content": user_input})
-        self.context.maybe_compress(
-            self.messages, self.llm,
-            on_compress=self._on_compress if self.memory is not None and self.memory_enabled else None,
-        )
+        self._record("user_message", actor="user", input=user_input)
+        self.maybe_compress()
 
         for _ in range(self.max_rounds):
             resp = self.llm.chat(
@@ -151,6 +185,8 @@ class Agent:
             if not resp.tool_calls:
                 self.messages.append(resp.message)
                 reply = resp.content
+                # a completed turn is a natural boundary: always worth a snapshot
+                self._record("turn_end", actor="lead", output=reply)
                 # persist anything durable from this finished round
                 if self.memory is not None and self.memory_enabled:
                     try:
@@ -176,6 +212,7 @@ class Agent:
                         "tool_call_id": tc.id,
                         "content": result,
                     })
+                    self._record_tool(tc, result)
                 else:
                     # parallel execution for multiple tool calls
                     results = self._exec_tools_parallel(resp.tool_calls, on_tool)
@@ -185,19 +222,115 @@ class Agent:
                             "tool_call_id": tc.id,
                             "content": result,
                         })
+                        self._record_tool(tc, result)
             except KeyboardInterrupt:
+                # Snapshot BEFORE the backfill: the snapshot then holds exactly
+                # what a crash leaves behind -- an assistant message whose
+                # tool_calls have no replies -- and restore repairs it with
+                # repair_chain. Both are the same shape on purpose.
+                self._record("interrupt", actor="user", name=resp.tool_calls[0].name,
+                             data={"pending": [tc.id for tc in resp.tool_calls]})
                 # Ctrl+C mid-execution would leave the assistant tool_calls
                 # message without replies, poisoning the next request; backfill
                 self._answer_pending_tool_calls(resp.tool_calls)
                 raise
 
             # compress if tool outputs are big
-            self.context.maybe_compress(
-                self.messages, self.llm,
-                on_compress=self._on_compress if self.memory is not None and self.memory_enabled else None,
-            )
+            self.maybe_compress()
 
         return "(reached maximum tool-call rounds)"
+
+    # -- checkpoint wiring ----------------------------------------------------- #
+
+    def _record(self, event_type: str, **fields):
+        """Append an event; the checkpoint layer decides whether to snapshot."""
+        if self.checkpoints is None:
+            return None
+        return self.checkpoints.record(event_type, **fields)
+
+    def maybe_compress(self) -> bool:
+        """Compress context, snapshotting before anything irreversible happens.
+
+        Layers 2 and 3 rewrite ``messages`` in place (``messages.clear()``) --
+        the only irreversible context operation in the project, and exactly the
+        "截断时的 work_state" the design calls out. Layer 1 only trims verbose
+        tool output, so it is recorded but not snapshotted: snapshotting on it
+        would fire on most rounds of a long session ("不要无脑保存").
+
+        Call *this* rather than ``context.maybe_compress`` directly: the two
+        hooks below are the entire safety net, and going straight to the context
+        layer silently drops both the pre-truncation snapshot and the write-back
+        of durable facts into memory. ``/compact`` is the caller that matters --
+        it is the one place a user asks for truncation on purpose.
+        """
+        def before(layer: str):
+            if self.checkpoints is None:
+                return
+            if layer == "snip":
+                self.checkpoints.record("compress", actor="system", name=layer,
+                                        status="snip")
+            else:
+                self.checkpoints.snapshot(trigger="compress", actor="system",
+                                          force=True, label=f"上下文{layer}前")
+
+        def after(summary: str):
+            # remember where the transcript was cut, so a handoff can point back
+            # into the event log for the actions the summary swallowed
+            if self.checkpoints is not None:
+                self.checkpoints.mark_compressed(summary)
+            if self.memory is not None and self.memory_enabled:
+                self._on_compress(summary)
+
+        return self.context.maybe_compress(self.messages, self.llm,
+                                           on_compress=after,
+                                           before_compress=before)
+
+    def _record_tool(self, tc, result: str) -> None:
+        """Log a tool result, and an approval event when a human is being asked.
+
+        ``trigger_for`` drops the read-only tools, so this is cheap on the
+        common path: the event always lands in the log, only write/edit/bash/
+        team tools can raise it to a snapshot.
+        """
+        if self.checkpoints is None:
+            return
+        from .tools.bash import NEEDS_CONFIRM
+        text = result or ""
+        approval = NEEDS_CONFIRM in text
+        status = ("error" if text.startswith(("Error", "⚠", "⛔")) else "ok")
+        self.checkpoints.record(
+            "tool_done", actor="lead", name=tc.name, tool=tc.name,
+            input=str(tc.arguments), output=text, status=status,
+            files=self._tool_files(tc),
+        )
+        if approval:
+            # the design's ④/⑤: paused for a human decision is a hard boundary,
+            # and the pending command must survive the process dying
+            self.checkpoints.record("approval", actor="system", tool=tc.name,
+                                    output=text, status="pending")
+
+    @staticmethod
+    def _tool_files(tc) -> list[str]:
+        """The file a write/edit touched -- a pointer, never the content."""
+        args = tc.arguments or {}
+        path = args.get("file_path") or args.get("path")
+        return [str(path)] if path else []
+
+    def _on_todo_change(self, action: str, todo=None) -> None:
+        self._record("todo_changed", actor="lead", name=getattr(todo, "todo_id", ""),
+                     status=getattr(todo, "status", ""),
+                     data={"action": action, "title": getattr(todo, "title", "")})
+
+    def _on_task_change(self, task, previous: str | None) -> None:
+        self._record("task_changed", actor="lead", name=task.task_id,
+                     status=task.state,
+                     data={"from": previous or "", "to": task.state,
+                           "description": task.description})
+
+    def _on_team_event(self, action: str, name: str = "", **fields) -> None:
+        self._record("teammate_changed", actor="lead", name=name,
+                     status=fields.get("status", ""),
+                     data={"action": action, **fields})
 
     def _on_compress(self, summary: str):
         """Callback from ContextManager: pull durable facts out of a compressed
@@ -206,6 +339,30 @@ class Agent:
             self.memory.ingest_summary(summary)
         except Exception:
             pass
+
+    # -- restore --------------------------------------------------------------- #
+
+    def restore_state(self, cp_id: str) -> tuple[bool, str]:
+        """Pull the agent back to a checkpoint. Returns ``(ok, message)``.
+
+        Restores the agent's own state only -- messages (with the chain repaired)
+        and the todo list. Files are never touched; ``.TASK/`` is read fresh from
+        disk, so it needs no restoring. The handoff note is parked and injected
+        into the next request as a prelude, because a restored agent must
+        re-orient before it works.
+        """
+        if self.checkpoints is None:
+            return False, "checkpoint 未启用（用 ENCODER_CHECKPOINT_ENABLED=1 开启）"
+        if not self.checkpoints.adopt(cp_id):
+            return False, f"未找到断点 {cp_id}"
+        restored = self.checkpoints.restore(cp_id)
+        if restored is None:
+            return False, f"断点 {cp_id} 读取失败（文件可能已损坏）"
+
+        self.messages.clear()
+        self.messages.extend(restored.messages)
+        self.todos.restore(restored.todos)
+        return True, restored.handoff
 
     def _append_memory_notice(self, reply: str, result) -> str:
         """Append a deterministic conflict notice (not LLM-generated) so the
@@ -266,5 +423,9 @@ class Agent:
     def reset(self):
         """Clear conversation history and the session-scoped todo list.
         Persisted tasks in .TASK/ are intentionally kept."""
+        # snapshot first: /reset is the one moment the messages are about to be
+        # gone for good, so this must be recoverable
+        self._record("rewind", actor="user", data={"action": "reset"},
+                     name=str(len(self.messages)))
         self.messages.clear()
         self.todos.clear()

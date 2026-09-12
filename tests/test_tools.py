@@ -7,8 +7,8 @@ from encoder.tools import ALL_TOOLS, get_tool
 
 
 def test_tool_count():
-    # 7 base + 3 crontab + 2 web + 3 todo + 5 task + 5 team tools + 1 integrate
-    assert len(ALL_TOOLS) == 26
+    # 7 base + 3 crontab + 2 web + 3 todo + 5 task + 5 team + 1 integrate + 1 checkpoint
+    assert len(ALL_TOOLS) == 27
 
 
 def test_all_tools_have_valid_schema():

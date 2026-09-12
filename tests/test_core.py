@@ -16,7 +16,7 @@ def test_public_api_exports():
     assert Agent is not None
     assert LLM is not None
     assert Config is not None
-    assert len(ALL_TOOLS) == 26  # 15 existing + 5 task tools + 6 team tools
+    assert len(ALL_TOOLS) == 27  # 15 existing + 5 task + 6 team + 1 checkpoint
 
 
 def test_config_from_env(monkeypatch):

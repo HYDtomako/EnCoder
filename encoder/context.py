@@ -45,30 +45,42 @@ class ContextManager:
         self._collapse_at = int(max_tokens * 0.90)   # 90% -> hard collapse
 
     def maybe_compress(self, messages: list[dict], llm: LLM | None = None,
-                       on_compress: Callable[[str], None] | None = None) -> bool:
+                       on_compress: Callable[[str], None] | None = None,
+                       before_compress: Callable[[str], None] | None = None) -> bool:
         """Apply compression layers as needed. Returns True if any compression happened.
 
         ``on_compress``, when provided, is called with each generated summary
         string so the caller can persist durable facts into long-term memory
         instead of losing them when context is collapsed.
+
+        ``before_compress`` is called with the layer name *immediately before*
+        that layer touches ``messages``. Layers 2 and 3 rewrite the list in
+        place, so this is the last moment the pre-truncation work_state can be
+        captured -- the checkpoint layer takes a snapshot here.
         """
         current = estimate_tokens(messages)
         compressed = False
 
         # Layer 1: snip verbose tool outputs
         if current > self._snip_at:
+            if before_compress:
+                before_compress("snip")
             if self._snip_tool_outputs(messages):
                 compressed = True
                 current = estimate_tokens(messages)
 
         # Layer 2: LLM-powered summarization of old turns
         if current > self._summarize_at and len(messages) > 10:
+            if before_compress:
+                before_compress("summarize")
             if self._summarize_old(messages, llm, keep_recent=8, on_compress=on_compress):
                 compressed = True
                 current = estimate_tokens(messages)
 
         # Layer 3: hard collapse - last resort
         if current > self._collapse_at and len(messages) > 4:
+            if before_compress:
+                before_compress("collapse")
             self._hard_collapse(messages, llm, on_compress=on_compress)
             compressed = True
 

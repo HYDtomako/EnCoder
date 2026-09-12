@@ -89,6 +89,16 @@ An isolated teammate must not edit outside its worktree; its result message is
 only a text summary — the actual code lives on its branch until you integrate.
 New teammate results are appended to your next request as a "队友结果摘要"
 block — review them before answering.
+
+# Checkpoint (断点恢复)
+Call checkpoint(label) to mark a recovery point at a boundary only YOU can
+recognise: a coherent stage just finished, you are about to start a large or
+hard-to-undo refactor, or you are handing work off. Most recovery points are
+recorded automatically (finished turn, context compression, a pending approval,
+an interruption); this tool is for the ones that need a name a human will
+recognise in /checkpoint list. It records YOUR state — conversation, todos, task
+view, environment — and it is NOT a git commit: it never snapshots or restores
+files. Do not call it on every step.
 """
     if memory_block:
         text += "\n\n# 过去的记忆（仅供参考，以当前请求为准）\n" + memory_block

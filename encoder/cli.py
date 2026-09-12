@@ -33,6 +33,8 @@ def _parse_args():
     p.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
     p.add_argument("--demo", action="store_true", help="Run the offline scripted demo (no API key needed)")
     p.add_argument("-r", "--resume", metavar="ID", help="Resume a saved session")
+    p.add_argument("--resume-checkpoint", metavar="CP_ID",
+                   help="Restore agent state from a checkpoint (e.g. cp_0007) before starting")
     p.add_argument("--daemon", action="store_true", help="Run as a background task daemon: fires scheduled tasks with no interactive REPL")
     p.add_argument("--tui", action="store_true", help="Launch the full-screen Textual TUI as the interactive layer (default is the classic REPL)")
     p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
@@ -107,7 +109,15 @@ def main():
         integration_model=config.integration_model,
         integration_api_key=config.integration_api_key,
         integration_base_url=config.integration_base_url,
+        checkpoint_enabled=config.checkpoint_enabled,
+        checkpoint_dir=config.checkpoint_dir,
+        checkpoint_keep=config.checkpoint_keep,
+        checkpoint_max=config.checkpoint_max,
     )
+
+    # resume from a checkpoint: pull the agent's state back to that point
+    if args.resume_checkpoint:
+        _restore_checkpoint(agent, args.resume_checkpoint, required=True)
 
     # resume saved session
     if args.resume:
@@ -314,7 +324,7 @@ def _repl(agent: Agent, config: Config):
         if user_input == "/compact":
             from .context import estimate_tokens
             before = estimate_tokens(agent.messages)
-            compressed = agent.context.maybe_compress(agent.messages, agent.llm)
+            compressed = agent.maybe_compress()
             after = estimate_tokens(agent.messages)
             if compressed:
                 console.print(f"[green]Compressed: {before} → {after} tokens ({len(agent.messages)} messages)[/green]")
@@ -354,6 +364,9 @@ def _repl(agent: Agent, config: Config):
             continue
         if user_input == "/team" or user_input.startswith("/team "):
             _cmd_team(agent, user_input)
+            continue
+        if user_input == "/checkpoint" or user_input.startswith("/checkpoint "):
+            _cmd_checkpoint(agent, user_input)
             continue
 
         # an unknown /command shouldn't be sent to the model as a prompt
@@ -666,6 +679,115 @@ def _cmd_team(agent: Agent, user_input: str):
         console.print(line)
 
 
+def _cmd_checkpoint(agent: Agent, user_input: str):
+    """Handle /checkpoint: list | show <id> | restore <id> | compact.
+
+    Everything here reports; only ``restore`` changes anything, and it changes
+    the agent's state only -- files belong to git (``design_ckeckpoint.md``).
+    """
+    parts = user_input.strip().split()
+    cmd = parts[1] if len(parts) > 1 else "list"
+
+    if agent.checkpoints is None:
+        console.print("[yellow]Checkpoint 未启用（ENCODER_CHECKPOINT_ENABLED=0）。[/yellow]")
+        return
+
+    if cmd in ("list", "ls"):
+        metas = agent.checkpoints.list_checkpoints()
+        if not metas:
+            console.print("[dim]还没有断点。[/dim]")
+            return
+        head = agent.checkpoints.head_id()
+        console.print(f"[bold]断点（{len(metas)} 个，当前 {head or '-'}） "
+                      f"session={agent.checkpoints.session_id}[/bold]")
+        for m in metas:
+            mark = "[green]→[/green]" if m.get("id") == head else " "
+            extra = f"  [dim]合并 {len(m['replaces'])} 个[/dim]" if m.get("replaces") else ""
+            console.print(f" {mark} [cyan]{m['id']}[/cyan]  {m.get('created_at','')}  "
+                          f"{m.get('label','')}{extra}")
+        return
+
+    if cmd == "show":
+        if len(parts) < 3:
+            console.print("[yellow]Usage: /checkpoint show <id>[/yellow]")
+            return
+        _show_checkpoint(agent, parts[2])
+        return
+
+    if cmd == "restore":
+        if len(parts) < 3:
+            console.print("[yellow]Usage: /checkpoint restore <id>[/yellow]")
+            return
+        _restore_checkpoint(agent, parts[2])
+        return
+
+    if cmd == "compact":
+        console.print(agent.checkpoints.compact())
+        return
+
+    console.print("[yellow]Usage: /checkpoint [list|show <id>|restore <id>|compact][/yellow]")
+
+
+def _show_checkpoint(agent: Agent, cp_id: str):
+    """Print what a checkpoint holds -- state only, plus env drift."""
+    if not agent.checkpoints.adopt(cp_id):
+        console.print(f"[red]未找到断点 {cp_id}[/red]")
+        return
+    cp = agent.checkpoints.load(cp_id)
+    if cp is None:
+        console.print(f"[red]断点 {cp_id} 读取失败（文件可能已损坏）[/red]")
+        return
+    meta, state = cp.get("meta", {}), cp.get("state", {})
+    agent_state = state.get("agent", {})
+    execu = state.get("execution", {})
+    console.print(f"[bold]{meta.get('id')}[/bold]  {meta.get('created_at')}  "
+                  f"触发={meta.get('trigger')}  label={meta.get('label')}")
+    if meta.get("parent_id"):
+        console.print(f"  parent: [dim]{meta['parent_id']}[/dim]")
+    console.print(f"  messages: {len(agent_state.get('messages', []))} 条，"
+                  f"约 {agent_state.get('context', {}).get('token_estimate', 0)} tokens")
+    todos = agent_state.get("todos", []) or []
+    if todos:
+        console.print("  todos: " + ", ".join(
+            f"{t.get('todo_id')}[{t.get('status')}]{t.get('title', '')}" for t in todos[:6]))
+    tasks = agent_state.get("tasks", []) or []
+    if tasks:
+        console.print("  未完成任务: " + ", ".join(
+            f"{t.get('task_id')}[{t.get('state')}]" for t in tasks[:6]))
+    files = agent_state.get("context", {}).get("files") or []
+    if files:
+        console.print(f"  改过的文件: {', '.join(files[:8])}")
+    if execu.get("running"):
+        console.print("  队友: " + ", ".join(
+            f"{r.get('name')}({r.get('status')})" for r in execu["running"]))
+    if execu.get("pending_approval"):
+        console.print(f"  [yellow]待批准命令: {execu['pending_approval']}[/yellow]")
+    cp_env = state.get("env", {})
+    console.print(f"  env: cwd={cp_env.get('cwd')} branch={cp_env.get('branch') or '-'} "
+                  f"HEAD={cp_env.get('git_head') or '-'}")
+    changes = agent.checkpoints.env_diff(cp_env)
+    for c in changes:
+        console.print(f"  [yellow]⚠️ {c}[/yellow]")
+    console.print("[dim]（只是 agent 状态；文件回退请用 git，不是这里的职责）[/dim]")
+
+
+def _restore_checkpoint(agent: Agent, cp_id: str, required: bool = False) -> bool:
+    """Restore agent state from a checkpoint. Returns whether it worked."""
+    if agent.checkpoints is None:
+        console.print("[yellow]Checkpoint 未启用（ENCODER_CHECKPOINT_ENABLED=0）。[/yellow]")
+        return False
+    ok, message = agent.restore_state(cp_id)
+    if not ok:
+        console.print(f"[red]{message}[/red]")
+        if required:
+            sys.exit(1)
+        return False
+    console.print(f"[green]已恢复到断点 {cp_id}[/green]")
+    console.print(message)
+    console.print("[dim]恢复的是 agent 状态（messages/todos）。下一条消息会带上这份交接单。[/dim]")
+    return True
+
+
 def _max_attempts() -> int:
     from .task import MAX_ATTEMPTS
     return MAX_ATTEMPTS
@@ -691,6 +813,8 @@ def _show_help():
         "                 /task archive <root_id> | clear\n"
         "  /team          Teammate mode: status | on | off | release <name>\n"
         "                 /team integrate   Merge released worktree teammates back\n"
+        "  /checkpoint    List recovery points; /checkpoint show <id> to inspect\n"
+        "                 /checkpoint restore <id> | compact\n"
         "  quit           Exit Encoder\n"
         "\n"
         "[bold]Input:[/bold]\n"

@@ -72,6 +72,7 @@ class CommandRunner:
             "/memory": self._memory,
             "/task": self._task,
             "/team": self._team,
+            "/checkpoint": self._checkpoint, "/cp": self._checkpoint,
             "/quit": self._quit, "/exit": self._quit,
             "quit": self._quit, "exit": self._quit,
         }
@@ -101,6 +102,7 @@ class CommandRunner:
             "  /memory     记忆列表 / show / forget / organize / resolve / on / off\n"
             "  /task       任务:list / show <id> / update <id> <state|priority> / archive <root_id> / clear\n"
             "  /team       teammate:status / on / off / release <name> / integrate\n"
+            "  /checkpoint 断点:list / show <id> / restore <id> / compact\n"
             "  quit        退出\n"
             "\n"
             "◆ 输入\n"
@@ -131,7 +133,7 @@ class CommandRunner:
         from ..context import estimate_tokens
 
         before = estimate_tokens(self.agent.messages)
-        compressed = self.agent.context.maybe_compress(self.agent.messages, self.agent.llm)
+        compressed = self.agent.maybe_compress()
         after = estimate_tokens(self.agent.messages)
         if compressed:
             line = f"已压缩: {before} → {after} tokens({len(self.agent.messages)} messages)"
@@ -383,6 +385,91 @@ class CommandRunner:
                 ln.append(f"  (task {s['task_id']})", style=MUTED)
             lines.append(ln)
         return CommandResult(lines=lines)
+
+    def _checkpoint(self, arg: str, tokens: list[str]) -> CommandResult:
+        agent = self.agent
+        parts = (arg or "").split()
+        cmd = parts[0] if parts else "list"
+
+        if agent.checkpoints is None:
+            return CommandResult(lines=[Text("Checkpoint 未启用(ENCODER_CHECKPOINT_ENABLED=0)。",
+                                             style=WARNING)])
+
+        if cmd in ("list", "ls"):
+            metas = agent.checkpoints.list_checkpoints()
+            if not metas:
+                return CommandResult(lines=[Text("还没有断点。", style=MUTED)])
+            head = agent.checkpoints.head_id()
+            lines = [Text(f"断点({len(metas)} 个,当前 {head or '-'})"
+                          f"  session={agent.checkpoints.session_id}", style=GOLD)]
+            for m in metas:
+                ln = Text(f" {'→' if m.get('id') == head else ' '} "
+                          f"{m.get('id')}  {m.get('created_at', '')}  "
+                          f"{m.get('label', '')}", style=BEIGE)
+                if m.get("replaces"):
+                    ln.append(f"  (合并 {len(m['replaces'])} 个)", style=MUTED)
+                lines.append(ln)
+            return CommandResult(lines=lines)
+
+        if cmd == "show":
+            if len(parts) < 2:
+                return CommandResult(lines=[Text("用法: /checkpoint show <id>", style=WARNING)])
+            if not agent.checkpoints.adopt(parts[1]):
+                return CommandResult(lines=[Text(f"未找到断点 {parts[1]}", style=WARNING)])
+            cp = agent.checkpoints.load(parts[1])
+            if cp is None:
+                return CommandResult(lines=[Text(f"断点 {parts[1]} 读取失败。", style=WARNING)])
+            return CommandResult(lines=self._render_checkpoint(cp))
+
+        if cmd == "restore":
+            if len(parts) < 2:
+                return CommandResult(lines=[Text("用法: /checkpoint restore <id>", style=WARNING)])
+            ok, message = agent.restore_state(parts[1])
+            if not ok:
+                return CommandResult(lines=[Text(message, style=WARNING)])
+            return CommandResult(lines=[
+                Text(f"已恢复到断点 {parts[1]}", style=SUCCESS),
+                Text(message, style=MUTED),
+                Text("恢复的是 agent 状态(messages/todos);下一条消息会带上这份交接单。", style=MUTED),
+            ])
+
+        if cmd == "compact":
+            return CommandResult(lines=[Text(agent.checkpoints.compact(), style=TEXT)])
+
+        return CommandResult(lines=[Text("用法: /checkpoint [list|show <id>|restore <id>|compact]",
+                                         style=WARNING)])
+
+    def _render_checkpoint(self, cp: dict) -> list[Text]:
+        """一个断点里到底有什么(只报状态;文件回退归 git)。"""
+        meta, state = cp.get("meta", {}), cp.get("state", {})
+        agent_state, execu = state.get("agent", {}), state.get("execution", {})
+        ctx = agent_state.get("context", {})
+        lines = [Text(f"{meta.get('id')}  {meta.get('created_at')}  "
+                      f"触发={meta.get('trigger')}  {meta.get('label', '')}", style=GOLD)]
+        if meta.get("parent_id"):
+            lines.append(Text(f"  parent: {meta['parent_id']}", style=MUTED))
+        lines.append(Text(f"  messages: {len(agent_state.get('messages', []))} 条,"
+                          f"约 {ctx.get('token_estimate', 0)} tokens", style=TEXT))
+        for t in (agent_state.get("todos") or [])[:6]:
+            lines.append(Text(f"  todo {t.get('todo_id')}[{t.get('status')}] "
+                              f"{t.get('title', '')}", style=BEIGE))
+        for t in (agent_state.get("tasks") or [])[:6]:
+            lines.append(Text(f"  task {t.get('task_id')}[{t.get('state')}] "
+                              f"{t.get('description', '')}", style=BEIGE))
+        files = ctx.get("files") or []
+        if files:
+            lines.append(Text(f"  改过的文件: {', '.join(files[:8])}", style=MUTED))
+        for r in execu.get("running") or []:
+            lines.append(Text(f"  队友 {r.get('name')}({r.get('status')})", style=MUTED))
+        if execu.get("pending_approval"):
+            lines.append(Text(f"  待批准命令: {execu['pending_approval']}", style=WARNING))
+        cp_env = state.get("env", {})
+        lines.append(Text(f"  env: cwd={cp_env.get('cwd')} branch={cp_env.get('branch') or '-'} "
+                          f"HEAD={cp_env.get('git_head') or '-'}", style=MUTED))
+        for c in self.agent.checkpoints.env_diff(cp_env):
+            lines.append(Text(f"  ⚠️ {c}", style=WARNING))
+        lines.append(Text("  (只是 agent 状态;文件回退请用 git)", style=MUTED))
+        return lines
 
     def _quit(self, arg: str, tokens: list[str]) -> CommandResult:
         return CommandResult(action="exit")

@@ -45,6 +45,10 @@ class Config:
     integration_model: str | None = None  # better model for merge-conflict reconciling
     integration_api_key: str | None = None
     integration_base_url: str | None = None
+    checkpoint_enabled: bool = True       # breakpoint recovery (design_ckeckpoint.md)
+    checkpoint_dir: str = ".CHECKPOINT"
+    checkpoint_keep: int = 10             # snapshots compaction always keeps
+    checkpoint_max: int = 50              # above this, compaction runs automatically
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -76,4 +80,8 @@ class Config:
             integration_model=os.getenv("ENCODER_INTEGRATION_MODEL") or None,
             integration_api_key=os.getenv("ENCODER_INTEGRATION_API_KEY") or None,
             integration_base_url=os.getenv("ENCODER_INTEGRATION_BASE_URL") or None,
+            checkpoint_enabled=os.getenv("ENCODER_CHECKPOINT_ENABLED", "1") != "0",
+            checkpoint_dir=os.getenv("ENCODER_CHECKPOINT_DIR", ".CHECKPOINT"),
+            checkpoint_keep=int(os.getenv("ENCODER_CHECKPOINT_KEEP", "10")),
+            checkpoint_max=int(os.getenv("ENCODER_CHECKPOINT_MAX", "50")),
         )

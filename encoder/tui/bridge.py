@@ -9,8 +9,12 @@
 回合结束/错误/取消)先进线程安全队列,由 UI 侧定时 drain 到主线程渲染。
 取消(``request_cancel``)不杀线程,而是置位标记,工作线程在**下一次回调**时把它
 转成 ``KeyboardInterrupt`` 抛给 ``agent.chat`` —— ``agent.chat`` 现有 except 分支会
-回填未答复的 tool_calls(``agent.py:177``),之后异常传播到桥,桥**回滚本轮追加的
-messages**,保证会话历史一致。
+回填未答复的 tool_calls(``agent.py:177``),之后异常传播到桥;桥**保留本回合**,
+只播一个 ``cancelled`` 事件。
+
+保留而非回滚,是因为回滚会让用户自己那句请求也一起消失:下一句话失去先行词,模型
+只能凭空猜。中断只可能来自本桥的两个回调,两条路径都不留断口(见 ``_run_round``),
+所以保留是安全的。
 
 本模块不 import textual,方便 headless 单测。
 """
@@ -119,10 +123,18 @@ class AgentBridge:
             response = self.agent.chat(job.text, on_token=on_token, on_tool=on_tool)
             self._events.put(("ended", response))
         except KeyboardInterrupt:
-            # agent.chat 已回填 pending tool calls;整体丢弃本回合,保证历史一致
-            del self.agent.messages[snapshot:]
+            # 保留本回合,不删(agent.chat 已回填未答复的 tool_calls,链路合法)。
+            # 中断只可能来自本桥的两个回调:on_token 抛在 llm.chat 内部(此时除用户
+            # 消息外什么都还没追加),on_tool 抛在 agent 的 try 内(会走回填)。两条
+            # 路径都不留断口,所以保留是安全的。
+            # 为什么不删:一个回合往往已经产出了真实结果(写过的文件、跑过的命令),
+            # 而用户下一句话通常承接它。删掉本回合会让用户的请求本身也消失,新消息
+            # 失去先行词,模型只能凭空猜 —— 实测中断后说"保存至一个html中",模型把
+            # 仓库里的 Markdown 存成了一个 HTML。中断是"停下来",不是"这句不算数"。
             self._events.put(("cancelled", None))
         except Exception as exc:  # noqa: BLE001 - 任何异常都不能让工作线程死掉
+            # 与中断不同,异常可能来自工具执行中途且没有回填,链路可能真的是断的
+            # (未答复的 tool_calls 会让下一次请求被 API 拒);丢弃本回合才安全。
             del self.agent.messages[snapshot:]
             self._events.put(("error", f"{type(exc).__name__}: {exc}"))
         finally:

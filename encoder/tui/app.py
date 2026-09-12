@@ -256,10 +256,10 @@ class EncoderTuiApp(App[None]):
                         conv.add_agent(payload[0])
                 elif kind == "cancelled":
                     self._on_round_finished("cancelled", "")
-                    conv.add_system("⏹ 已中断本回合(历史已回滚)。", style=MUTED)
+                    conv.add_system("⏹ 已中断本回合(已做出的改动保留在上下文里)。", style=MUTED)
                 elif kind == "error":
                     self._on_round_finished("error", "")
-                    conv.add_system(f"✖ {payload[0]}", style="#d07a5e")
+                    conv.add_system(f"✖ {payload[0]}(本回合已回滚)", style="#d07a5e")
                 elif kind == "round_done":
                     self._on_round_finished("done", "")
             except Exception:  # noqa: S112 BLE001 - 单个事件渲染失败不应拖垮 drain 循环
