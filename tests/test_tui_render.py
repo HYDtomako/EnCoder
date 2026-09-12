@@ -132,7 +132,8 @@ def _stub_agent(**overrides) -> MagicMock:
     agent.llm.total_completion_tokens = 5
     agent.llm.estimated_cost = 0.001
     agent.messages = []
-    agent.context.maybe_compress.return_value = False
+    # /compact 走 Agent.maybe_compress(而不是 context 那一层),所以桩要打在 Agent 上
+    agent.maybe_compress.return_value = False
     agent.scheduler.list_tasks.return_value = []
     agent.tasks.list.return_value = []
     agent.memory = MagicMock()
@@ -185,6 +186,19 @@ def test_tokens_command():
 def test_compact_noop():
     r, _ = _runner()
     assert "无需压缩" in _plain(r.dispatch("/compact"))
+
+
+def test_compact_goes_through_the_guarded_agent_method():
+    """/compact must call Agent.maybe_compress, never the context layer directly.
+
+    The context layer has no hooks, so calling it straight loses the snapshot
+    taken before layers 2/3 clear ``messages`` -- the pre-truncation work_state
+    the checkpoint design exists to keep.
+    """
+    r, _ = _runner()
+    r.dispatch("/compact")
+    r.agent.maybe_compress.assert_called_once()
+    r.agent.context.maybe_compress.assert_not_called()
 
 
 def test_save_session():

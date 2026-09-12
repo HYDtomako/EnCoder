@@ -219,9 +219,10 @@ class Teammate:
                 result = self.agent.chat(prompt)
             except Exception as e:
                 result = f"[teammate error] {e}"
-            # checkpoint any repo edits onto our own branch *while still work*,
-            # so an integrate() merge (which only touches idle/ending teammates)
-            # never races a mid-commit worktree.
+            # commit any repo edits onto our own branch *while still work*, so an
+            # integrate() merge (which only touches idle/ending teammates) never
+            # races a mid-commit worktree. (This is a git commit -- unrelated to
+            # the agent-level checkpoint in checkpoint.py.)
             try:
                 self._commit_work()
             finally:
@@ -316,8 +317,20 @@ class TeamManager:
         self.integration_api_key = integration_api_key
         self.integration_base_url = integration_base_url
         self._integration_llm = None
+        # observation hook for the checkpoint layer: on_event(action, name, **fields).
+        # A teammate's worktree/branch/status live only in this object, so a
+        # snapshot could not otherwise know a teammate exists at all.
+        self.on_event = None
 
     # -- helpers --------------------------------------------------------------
+
+    def _notify(self, action: str, name: str = "", **fields) -> None:
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(action, name=name, **fields)
+        except Exception:
+            pass          # observation must never break the team
 
     def _active(self) -> list[Teammate]:
         return [t for t in self._teammates.values() if t.status != "ending"]
@@ -488,6 +501,8 @@ class TeamManager:
             self.mailbox.post(name, {"from": "Lead", "kind": "task",
                                      "task_id": task.task_id,
                                      "content": task.description})
+        self._notify("spawn", name=name, status="idle", task_id=task.task_id,
+                     branch=branch, worktree=wt)
         return teammate
 
     # -- query / control ------------------------------------------------------
@@ -509,6 +524,10 @@ class TeamManager:
         if name not in self._teammates:
             return False
         self.mailbox.post(name, {"from": "Lead", "kind": "end", "content": ""})
+        # the teammate's branch is now the only place its work exists
+        self._notify("release", name=name, status="ending",
+                     branch=self._teammates[name]._branch,
+                     worktree=self._teammates[name]._worktree)
         return True
 
     def release_all(self) -> None:
@@ -625,7 +644,7 @@ Teammate {t.name}'s own summary of this work (context on its intent):
 
         lines: list[str] = []
         for t in candidates:
-            t._commit_work()                       # best-effort final checkpoint
+            t._commit_work()                       # best-effort final git commit
             if self._ahead_of_head(t._branch) == 0:
                 self._discard_teammate(t)
                 lines.append(f"- {t.name}: no repo changes to merge; worktree cleaned")
@@ -668,6 +687,11 @@ Teammate {t.name}'s own summary of this work (context on its intent):
                     f"- {t.name} ({t._branch}): conflicted → reconciled by the "
                     f"Integration Agent and merged.\n    {report[:_RESULT_TRIM]}")
 
+        # the merge moved HEAD and removed worktrees: the environment changed in
+        # a way no other event reports
+        self._notify("integrate", status="merged",
+                     head=self._git(["rev-parse", "--short", "HEAD"]).stdout.strip(),
+                     merged=[t.name for t in candidates])
         header = "# integrate_results（已把 release 的代码 teammate 归并进当前分支）"
         return "\n".join([header] + lines)
 

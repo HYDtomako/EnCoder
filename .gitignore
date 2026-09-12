@@ -12,3 +12,5 @@ encoder.egg-info
 .worktrees/
 .Mailbox/
 .TASK/
+.MEMORY/
+.CHECKPOINT/

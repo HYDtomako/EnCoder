@@ -36,6 +36,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 STATES: tuple[str, ...] = ("pending", "in_progress", "completed")
 PRIORITIES: tuple[str, ...] = ("high", "normal", "low")
@@ -88,11 +89,25 @@ class Todo:
 
 
 class TodoList:
-    """The Lead's checklist for the current request. In-memory, not persisted."""
+    """The Lead's checklist for the current request. In-memory, not persisted.
+
+    ``on_change(action, todo=None)`` is the observation hook the checkpoint layer
+    subscribes to -- the checklist itself stays in memory and is only durable
+    because a snapshot copied it.
+    """
 
     def __init__(self) -> None:
         self._items: list[Todo] = []
         self._counter = 0
+        self.on_change: Callable[[str, Todo | None], None] | None = None
+
+    def _notify(self, action: str, todo: Todo | None = None) -> None:
+        if self.on_change is None:
+            return
+        try:
+            self.on_change(action, todo)
+        except Exception:
+            pass          # observation must never break the mutation
 
     def create(self, titles: list[str], task_id: str | None = None) -> list[Todo]:
         """Create 1..N todos (all pending), return the created todos."""
@@ -105,6 +120,8 @@ class TodoList:
             todo = Todo(todo_id=f"t{self._counter}", title=title, task_id=task_id)
             self._items.append(todo)
             created.append(todo)
+        if created:
+            self._notify("create", created[-1])
         return created
 
     def update(self, todo_id: str, *, status: str | None = None,
@@ -118,15 +135,39 @@ class TodoList:
                     todo.status = status
                 if note is not None:
                     todo.note = str(note)
+                self._notify("update", todo)
                 return todo
         return None
 
     def list(self) -> list[Todo]:
         return list(self._items)
 
+    def restore(self, items: list[dict]) -> int:
+        """Rebuild the checklist from a checkpoint snapshot. Returns the count.
+
+        The counter is re-derived from the ids so newly created todos after a
+        restore can't collide with the ones that came back.
+        """
+        self._items = []
+        self._counter = 0
+        for data in items or []:
+            if not isinstance(data, dict):
+                continue
+            try:
+                todo = Todo(**{k: v for k, v in data.items()
+                               if k in Todo.__dataclass_fields__})
+            except TypeError:
+                continue
+            self._items.append(todo)
+            suffix = str(todo.todo_id).lstrip("t")
+            if suffix.isdigit():
+                self._counter = max(self._counter, int(suffix))
+        return len(self._items)
+
     def clear(self) -> None:
         self._items.clear()
         self._counter = 0
+        self._notify("clear")
 
 
 # --------------------------------------------------------------------------- #
@@ -163,6 +204,10 @@ class TaskManager:
         self.done_dir = self.base_dir / _DONE_DIRNAME
         self._lock = threading.Lock()
         self._index: dict[str, Path] | None = None   # task_id -> file, built lazily
+        # observation hook for the checkpoint layer: on_change(task, previous_state)
+        # called from save(), which is the single chokepoint every mutation path
+        # goes through -- so no state transition can slip past unnoticed.
+        self.on_change: Callable[[Task, str | None], None] | None = None
 
     # -- lookup --------------------------------------------------------------
 
@@ -283,11 +328,25 @@ class TaskManager:
         task.updated_at = _now()
         self.base_dir.mkdir(parents=True, exist_ok=True)
         path = self._index_get(task.task_id) or self._file_path(task)
+        # read the previous state only when someone is watching: the transition
+        # is what makes a 'task completed' milestone distinguishable from any
+        # other write to an already-completed task.
+        previous: str | None = None
+        if self.on_change is not None and path.exists():
+            try:
+                previous = _to_task(json.loads(path.read_text(encoding="utf-8"))).state
+            except (json.JSONDecodeError, OSError, TypeError):
+                previous = None
         tmp = self.base_dir / f"{path.name}.tmp"
         tmp.write_text(json.dumps(asdict(task), ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
         if self._index is not None:
             self._index[task.task_id] = path
+        if self.on_change is not None:
+            try:
+                self.on_change(task, previous)
+            except Exception:
+                pass      # observation must never break the mutation
 
     def clear(self) -> None:
         """Delete every active task file (archive kept). Dangerous; user-confirmed."""

@@ -24,6 +24,11 @@ from .paths import get_cwd, get_root
 # shared global: each worker thread carries its own cwd. See article 05.
 _local = threading.local()
 
+# Sentinel on a "risky command, waiting for a human" tool result. Hoisted to a
+# constant so the checkpoint layer can recognise a pending approval from the
+# message chain alone (no state is kept anywhere else) -- see checkpoint.py.
+NEEDS_CONFIRM = "⛔ Needs your confirmation:"
+
 # --------------------------------------------------------------------------- #
 # Tier 1 - hard-blocked: could wreck the filesystem or leak secrets. These are
 # refused unconditionally, even with confirm=true (never appropriate).
@@ -130,7 +135,7 @@ class BashTool(Tool):
             if not self.can_confirm:
                 return (f"⛔ Refused: {reason} (no interactive user here to "
                         f"approve it)\nCommand: {command}")
-            return (f"⛔ Needs your confirmation: {reason}\nCommand: {command}\n"
+            return (f"{NEEDS_CONFIRM} {reason}\nCommand: {command}\n"
                     f"Ask the user, and only if they approve rerun with confirm=true.")
 
         return self._run(command, timeout)
