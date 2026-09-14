@@ -8,6 +8,7 @@ and makes edits safe and reviewable.
 
 import difflib
 
+from ..checkpoint import record_change, rel_path
 from .base import Tool
 from .paths import resolve
 
@@ -70,14 +71,25 @@ class EditFileTool(Tool):
             _changed_files.add(str(p))
 
             # generate a unified diff so the user/LLM can see exactly what changed
-            diff = _unified_diff(content, new_content, str(p))
-            return f"Edited {file_path}\n{diff}"
+            full = _unified_diff(content, new_content, str(p))
+            # ... and hand the same diff to the event log as the structured
+            # `change`. The return value is clipped twice on its way out (2500
+            # chars here, 800 in the checkpoint layer) -- far too little to prove
+            # what changed, which is why this is a field and not just output.
+            record_change(file_path, "edit", patch=full)
+            return f"Edited {file_path}\n{_clip_diff(full)}"
         except Exception as e:
             return f"Error: {e}"
 
 
 def _unified_diff(old: str, new: str, filename: str, context: int = 3) -> str:
-    """Generate a compact unified diff between old and new file content."""
+    """Generate a compact unified diff between old and new file content.
+
+    ``filename`` is relativized first: callers hand over the *resolved* path, and
+    an absolute one would put a machine-specific header on a diff whose ``change``
+    payload names the same file relatively.
+    """
+    filename = rel_path(filename)
     old_lines = old.splitlines(keepends=True)
     new_lines = new.splitlines(keepends=True)
     diff = difflib.unified_diff(
@@ -85,8 +97,11 @@ def _unified_diff(old: str, new: str, filename: str, context: int = 3) -> str:
         fromfile=f"a/{filename}", tofile=f"b/{filename}",
         n=context,
     )
-    result = "".join(diff)
-    # truncate enormous diffs
-    if len(result) > 3000:
-        result = result[:2500] + "\n... (diff truncated)\n"
-    return result
+    return "".join(diff)
+
+
+def _clip_diff(diff: str) -> str:
+    """Bound the diff on its way back to the model (the stored one cuts itself)."""
+    if len(diff) > 3000:
+        return diff[:2500] + "\n... (diff truncated)\n"
+    return diff

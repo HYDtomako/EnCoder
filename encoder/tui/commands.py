@@ -16,6 +16,7 @@ from rich.text import Text
 
 from .. import __version__
 from ..agent import Agent
+from ..checkpoint import describe_error
 from ..config import Config
 from ..session import list_sessions, save_session
 from . import render
@@ -42,6 +43,14 @@ class CommandResult:
     lines: list[Text] = field(default_factory=list)
     action: str = ""                      # "exit" | "reset" | ""
     confirm: ConfirmRequest | None = None
+
+
+def _to_lines(text: Text) -> list[Text]:
+    """多行 Text 拆成逐行——命令返回的本来就是行列表(样式跟着走)。"""
+    try:
+        return text.split("\n", allow_blank=True) or [text]
+    except TypeError:                     # 老版本 rich 没有 allow_blank
+        return text.split("\n") or [text]
 
 
 class CommandRunner:
@@ -73,6 +82,7 @@ class CommandRunner:
             "/task": self._task,
             "/team": self._team,
             "/checkpoint": self._checkpoint, "/cp": self._checkpoint,
+            "/trace": self._trace,
             "/quit": self._quit, "/exit": self._quit,
             "quit": self._quit, "exit": self._quit,
         }
@@ -103,6 +113,7 @@ class CommandRunner:
             "  /task       任务:list / show <id> / update <id> <state|priority> / archive <root_id> / clear\n"
             "  /team       teammate:status / on / off / release <name> / integrate\n"
             "  /checkpoint 断点:list / show <id> / restore <id> / compact\n"
+            "  /trace      时间线:list / <n> / <n> full(这一轮到底干了什么)\n"
             "  quit        退出\n"
             "\n"
             "◆ 输入\n"
@@ -408,7 +419,12 @@ class CommandRunner:
                           f"{m.get('label', '')}", style=BEIGE)
                 if m.get("replaces"):
                     ln.append(f"  (合并 {len(m['replaces'])} 个)", style=MUTED)
+                resume = m.get("resume") or {}
+                if resume:
+                    ln.append(f"  ↻{resume.get('kind', 'task')}", style=GOLD)
                 lines.append(ln)
+            lines.append(Text("↻ = 知道下一步该做什么;restore 之后回复「继续」即可接上。",
+                              style=MUTED))
             return CommandResult(lines=lines)
 
         if cmd == "show":
@@ -430,7 +446,8 @@ class CommandRunner:
             return CommandResult(lines=[
                 Text(f"已恢复到断点 {parts[1]}", style=SUCCESS),
                 Text(message, style=MUTED),
-                Text("恢复的是 agent 状态(messages/todos);下一条消息会带上这份交接单。", style=MUTED),
+                Text("恢复的是 agent 状态(messages/todos);想接着原任务做就直接回复「继续」。",
+                     style=MUTED),
             ])
 
         if cmd == "compact":
@@ -462,7 +479,19 @@ class CommandRunner:
         for r in execu.get("running") or []:
             lines.append(Text(f"  队友 {r.get('name')}({r.get('status')})", style=MUTED))
         if execu.get("pending_approval"):
-            lines.append(Text(f"  待批准命令: {execu['pending_approval']}", style=WARNING))
+            approval = execu["pending_approval"]
+            lines.append(Text(f"  待批准: {approval.get('command') or '(无命令)'}"
+                              f"({approval.get('reason') or approval.get('tool', '')})",
+                              style=WARNING))
+        if execu.get("pending_tool_call"):
+            call = execu["pending_tool_call"]
+            lines.append(Text(f"  未答完的调用: {call.get('tool')}({call.get('args')})",
+                              style=WARNING))
+        if execu.get("last_error"):
+            lines.append(Text(f"  上次为什么停下: {describe_error(execu['last_error'])}",
+                              style=WARNING))
+        if (execu.get("resume") or {}).get("kind") == "review":
+            lines.append(Text("  这是 review 任务:恢复后接着执行,别重新派队友", style=GOLD))
         cp_env = state.get("env", {})
         lines.append(Text(f"  env: cwd={cp_env.get('cwd')} branch={cp_env.get('branch') or '-'} "
                           f"HEAD={cp_env.get('git_head') or '-'}", style=MUTED))
@@ -470,6 +499,52 @@ class CommandRunner:
             lines.append(Text(f"  ⚠️ {c}", style=WARNING))
         lines.append(Text("  (只是 agent 状态;文件回退请用 git)", style=MUTED))
         return lines
+
+    def _trace(self, arg: str, tokens: list[str]) -> CommandResult:
+        """时间线视图:这一轮到底干了什么、为什么这么干(只读,不改 agent)。
+
+        和 ``/checkpoint`` 读的是同一份 ``events.jsonl``:那边看状态(能恢复),
+        这边看过程(能看懂)。不做实时跟随——TUI 已经有实时视图,``/trace`` 的价值
+        是事后回看。
+        """
+        agent = self.agent
+        if agent.checkpoints is None:
+            return CommandResult(lines=[Text(
+                "Trace 需要事件日志(ENCODER_CHECKPOINT_ENABLED=0 时没有)。", style=WARNING)])
+        from ..trace import (
+            build_traces,
+            read_checkpoints,
+            read_events,
+            render_index,
+            render_trace,
+        )
+        session = agent.checkpoints.dir
+        traces = build_traces(read_events(session), read_checkpoints(session))
+        if not traces:
+            return CommandResult(lines=[Text("这个 session 还没有事件(日志是空的)。",
+                                             style=MUTED)])
+        parts = (arg or "").split()
+        full = "full" in [p.lower() for p in parts]
+        parts = [p for p in parts if p.lower() != "full"]
+        which = parts[0] if parts else ""
+
+        if which in ("list", "ls"):
+            return CommandResult(lines=_to_lines(render_index(traces)))
+        if which:
+            try:
+                index = int(which)
+            except ValueError:
+                return CommandResult(lines=[Text("用法: /trace [list|<n>] [full]",
+                                                style=WARNING)])
+            picked = [t for t in traces if t.index == index]
+            if not picked:
+                return CommandResult(lines=[Text(
+                    f"没有第 {index} 条 trace(共 {len(traces)} 条)。", style=WARNING)])
+            return CommandResult(lines=_to_lines(render_trace(picked[0], full=full)))
+        lines = _to_lines(render_trace(traces[-1], full=full))
+        lines.append(Text(f"最近一条 turn(共 {len(traces)} 条);"
+                          f"/trace list 看全程,/trace <n> full 看细节。", style=MUTED))
+        return CommandResult(lines=lines)
 
     def _quit(self, arg: str, tokens: list[str]) -> CommandResult:
         return CommandResult(action="exit")

@@ -13,6 +13,7 @@ from rich.panel import Panel
 
 from . import __version__
 from .agent import Agent
+from .checkpoint import describe_error
 from .config import Config
 from .cron_scheduler import get_scheduler
 from .llm import LLM, LiteLLM
@@ -368,6 +369,9 @@ def _repl(agent: Agent, config: Config):
         if user_input == "/checkpoint" or user_input.startswith("/checkpoint "):
             _cmd_checkpoint(agent, user_input)
             continue
+        if user_input == "/trace" or user_input.startswith("/trace "):
+            _cmd_trace(agent, user_input)
+            continue
 
         # an unknown /command shouldn't be sent to the model as a prompt
         if user_input.startswith("/"):
@@ -679,6 +683,54 @@ def _cmd_team(agent: Agent, user_input: str):
         console.print(line)
 
 
+def _cmd_trace(agent: Agent, user_input: str):
+    """Handle /trace: [list | <n>] [full] -- read the event log as a timeline.
+
+    A read-only view: it never touches the agent, so it is safe mid-session.
+    """
+    if agent.checkpoints is None:
+        console.print("[yellow]Trace 需要事件日志（ENCODER_CHECKPOINT_ENABLED=0 时没有）。[/yellow]")
+        return
+    from .trace import (
+        build_traces,
+        read_checkpoints,
+        read_events,
+        render_index,
+        render_trace,
+    )
+    session = agent.checkpoints.dir
+    events = read_events(session)
+    if not events:
+        console.print("[dim]这个 session 还没有事件（日志是空的）。[/dim]")
+        return
+    traces = build_traces(events, read_checkpoints(session))
+
+    parts = user_input.strip().split()[1:]
+    full = "full" in [p.lower() for p in parts]
+    parts = [p for p in parts if p.lower() != "full"]
+    which = parts[0] if parts else ""
+
+    if which in ("list", "ls"):
+        console.print(render_index(traces))
+        console.print("[dim]/trace <n> 看某一条；加 full 铺开输出与补丁。[/dim]")
+        return
+    if which:
+        try:
+            index = int(which)
+        except ValueError:
+            console.print("[yellow]Usage: /trace [list|<n>] [full][/yellow]")
+            return
+        picked = [t for t in traces if t.index == index]
+        if not picked:
+            console.print(f"[yellow]没有第 {index} 条 trace（共 {len(traces)} 条）。[/yellow]")
+            return
+        console.print(render_trace(picked[0], full=full))
+        return
+    console.print(render_trace(traces[-1], full=full))
+    console.print(f"[dim]这是最近一条 turn（共 {len(traces)} 条）：上面是结构，"
+                  "/trace list 看全程，/trace <n> full 看细节。[/dim]")
+
+
 def _cmd_checkpoint(agent: Agent, user_input: str):
     """Handle /checkpoint: list | show <id> | restore <id> | compact.
 
@@ -703,8 +755,16 @@ def _cmd_checkpoint(agent: Agent, user_input: str):
         for m in metas:
             mark = "[green]→[/green]" if m.get("id") == head else " "
             extra = f"  [dim]合并 {len(m['replaces'])} 个[/dim]" if m.get("replaces") else ""
+            # "可续跑": the short resume descriptor rides in meta precisely so
+            # this listing can say so without loading a full state (v2 §11.3)
+            resume = m.get("resume") or {}
+            if resume:
+                kind = resume.get("kind", "task")
+                extra += f"  [magenta]↻{kind}[/magenta]"
             console.print(f" {mark} [cyan]{m['id']}[/cyan]  {m.get('created_at','')}  "
                           f"{m.get('label','')}{extra}")
+        console.print("[dim]↻ = 这个断点知道下一步该做什么；/checkpoint show <id> 看细节，"
+                      "restore 之后回复「继续」即可接上。[/dim]")
         return
 
     if cmd == "show":
@@ -761,7 +821,17 @@ def _show_checkpoint(agent: Agent, cp_id: str):
         console.print("  队友: " + ", ".join(
             f"{r.get('name')}({r.get('status')})" for r in execu["running"]))
     if execu.get("pending_approval"):
-        console.print(f"  [yellow]待批准命令: {execu['pending_approval']}[/yellow]")
+        approval = execu["pending_approval"]
+        console.print(f"  [yellow]待批准: {approval.get('command') or '(无命令)'}"
+                      f"（{approval.get('reason') or approval.get('tool', '')}）[/yellow]")
+    if execu.get("pending_tool_call"):
+        call = execu["pending_tool_call"]
+        console.print(f"  [yellow]未答完的调用: {call.get('tool')}"
+                      f"({call.get('args')})[/yellow]")
+    if execu.get("last_error"):
+        console.print(f"  [red]上次为什么停下: {describe_error(execu['last_error'])}[/red]")
+    if execu.get("resume") and execu["resume"].get("kind") == "review":
+        console.print("  [magenta]这是 review 任务：恢复后接着执行，别重新派队友[/magenta]")
     cp_env = state.get("env", {})
     console.print(f"  env: cwd={cp_env.get('cwd')} branch={cp_env.get('branch') or '-'} "
                   f"HEAD={cp_env.get('git_head') or '-'}")
@@ -784,7 +854,8 @@ def _restore_checkpoint(agent: Agent, cp_id: str, required: bool = False) -> boo
         return False
     console.print(f"[green]已恢复到断点 {cp_id}[/green]")
     console.print(message)
-    console.print("[dim]恢复的是 agent 状态（messages/todos）。下一条消息会带上这份交接单。[/dim]")
+    console.print("[dim]恢复的是 agent 状态（messages/todos）。下一条消息会带上这份交接单；"
+                  "想接着原任务做，直接回复「继续」即可（会把原任务一起带回来）。[/dim]")
     return True
 
 
@@ -815,6 +886,8 @@ def _show_help():
         "                 /team integrate   Merge released worktree teammates back\n"
         "  /checkpoint    List recovery points; /checkpoint show <id> to inspect\n"
         "                 /checkpoint restore <id> | compact\n"
+        "  /trace         What the last turn actually did (timeline view)\n"
+        "                 /trace list | /trace <n> [full]\n"
         "  quit           Exit Encoder\n"
         "\n"
         "[bold]Input:[/bold]\n"
