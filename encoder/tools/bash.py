@@ -29,6 +29,24 @@ _local = threading.local()
 # message chain alone (no state is kept anywhere else) -- see checkpoint.py.
 NEEDS_CONFIRM = "⛔ Needs your confirmation:"
 
+# The *structured* form of the same fact, published here and popped by the agent
+# when it logs the tool result: the snapshot's pending_approval has to name the
+# command, and scraping it back out of the rendered message breaks the day
+# someone rewords that sentence. Thread-local for the same reason as ``_local``:
+# parallel tool calls each need their own.
+_approval = threading.local()
+
+
+def take_pending_approval() -> dict | None:
+    """Pop the approval this thread raised for its most recent command.
+
+    Popping rather than reading: a stale flag left by an earlier command in a
+    reused worker thread must never be attributed to a later tool result.
+    """
+    pending = getattr(_approval, "pending", None)
+    _approval.pending = None
+    return pending
+
 # --------------------------------------------------------------------------- #
 # Tier 1 - hard-blocked: could wreck the filesystem or leak secrets. These are
 # refused unconditionally, even with confirm=true (never appropriate).
@@ -135,6 +153,7 @@ class BashTool(Tool):
             if not self.can_confirm:
                 return (f"⛔ Refused: {reason} (no interactive user here to "
                         f"approve it)\nCommand: {command}")
+            _approval.pending = {"tool": "bash", "command": command, "reason": reason}
             return (f"{NEEDS_CONFIRM} {reason}\nCommand: {command}\n"
                     f"Ask the user, and only if they approve rerun with confirm=true.")
 

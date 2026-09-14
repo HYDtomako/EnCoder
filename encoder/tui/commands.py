@@ -16,6 +16,7 @@ from rich.text import Text
 
 from .. import __version__
 from ..agent import Agent
+from ..checkpoint import describe_error
 from ..config import Config
 from ..session import list_sessions, save_session
 from . import render
@@ -408,7 +409,12 @@ class CommandRunner:
                           f"{m.get('label', '')}", style=BEIGE)
                 if m.get("replaces"):
                     ln.append(f"  (合并 {len(m['replaces'])} 个)", style=MUTED)
+                resume = m.get("resume") or {}
+                if resume:
+                    ln.append(f"  ↻{resume.get('kind', 'task')}", style=GOLD)
                 lines.append(ln)
+            lines.append(Text("↻ = 知道下一步该做什么;restore 之后回复「继续」即可接上。",
+                              style=MUTED))
             return CommandResult(lines=lines)
 
         if cmd == "show":
@@ -430,7 +436,8 @@ class CommandRunner:
             return CommandResult(lines=[
                 Text(f"已恢复到断点 {parts[1]}", style=SUCCESS),
                 Text(message, style=MUTED),
-                Text("恢复的是 agent 状态(messages/todos);下一条消息会带上这份交接单。", style=MUTED),
+                Text("恢复的是 agent 状态(messages/todos);想接着原任务做就直接回复「继续」。",
+                     style=MUTED),
             ])
 
         if cmd == "compact":
@@ -462,7 +469,19 @@ class CommandRunner:
         for r in execu.get("running") or []:
             lines.append(Text(f"  队友 {r.get('name')}({r.get('status')})", style=MUTED))
         if execu.get("pending_approval"):
-            lines.append(Text(f"  待批准命令: {execu['pending_approval']}", style=WARNING))
+            approval = execu["pending_approval"]
+            lines.append(Text(f"  待批准: {approval.get('command') or '(无命令)'}"
+                              f"({approval.get('reason') or approval.get('tool', '')})",
+                              style=WARNING))
+        if execu.get("pending_tool_call"):
+            call = execu["pending_tool_call"]
+            lines.append(Text(f"  未答完的调用: {call.get('tool')}({call.get('args')})",
+                              style=WARNING))
+        if execu.get("last_error"):
+            lines.append(Text(f"  上次为什么停下: {describe_error(execu['last_error'])}",
+                              style=WARNING))
+        if (execu.get("resume") or {}).get("kind") == "review":
+            lines.append(Text("  这是 review 任务:恢复后接着执行,别重新派队友", style=GOLD))
         cp_env = state.get("env", {})
         lines.append(Text(f"  env: cwd={cp_env.get('cwd')} branch={cp_env.get('branch') or '-'} "
                           f"HEAD={cp_env.get('git_head') or '-'}", style=MUTED))

@@ -148,6 +148,15 @@ class Agent:
             memory_block = self.memory.recall(user_input, self.messages[-6:])
         self._system = system_prompt(self.tools, memory_block=memory_block)
 
+        # a bare "carry on" after a restore becomes "继续：<the task that was in
+        # flight>". Done here, before the prelude is assembled, because the task
+        # text is the request and the prelude is context riding alongside it --
+        # and because the rewrite is idempotent (wrap_continue strips first), so
+        # restoring the same checkpoint twice cannot stack prefixes.
+        raw_input = user_input
+        if self.checkpoints is not None:
+            user_input = self.checkpoints.resume_for_input(user_input)
+
         # deterministic prelude: persisted unfinished tasks first (xuigai2.0:
         # the Lead must see leftover .TASK/ work every request and judge for
         # itself whether to continue/archive it), then teammate results. The
@@ -171,7 +180,12 @@ class Agent:
             user_input = "\n\n".join(prelude + [user_input])
 
         self.messages.append({"role": "user", "content": user_input})
-        self._record("user_message", actor="user", input=user_input)
+        # ``input`` is what the *user* typed, ``data.prompt`` what was actually
+        # sent. v1 logged only the augmented text, so the raw request was gone
+        # -- and the augmentations quote older handoffs, i.e. the resume text
+        # was already accumulating the very prefixes §11.1 exists to prevent.
+        self._record("user_message", actor="user", input=raw_input,
+                     data={"raw": raw_input, "prompt": user_input})
         self.maybe_compress()
 
         for _ in range(self.max_rounds):
@@ -291,23 +305,43 @@ class Agent:
         ``trigger_for`` drops the read-only tools, so this is cheap on the
         common path: the event always lands in the log, only write/edit/bash/
         team tools can raise it to a snapshot.
+
+        ``data.args`` carries the arguments themselves, not just ``str(args)``:
+        the snapshot has to be able to say *what* was running when it stopped,
+        and a failed call's arguments are half of "why it stopped" (v2 §11.2a).
         """
         if self.checkpoints is None:
             return
-        from .tools.bash import NEEDS_CONFIRM
+        from .tools.bash import take_pending_approval
         text = result or ""
-        approval = NEEDS_CONFIRM in text
-        status = ("error" if text.startswith(("Error", "⚠", "⛔")) else "ok")
+        pending = take_pending_approval()
+        # "waiting for a human" is not a failure: the ⛔ prefix would otherwise
+        # classify it as one, and last_error would report the agent as stuck on
+        # a call that is merely unanswered (a "⛔ Refused" in a teammate has no
+        # pending approval and stays an error -- it really did fail).
+        if pending:
+            status = "pending"
+        else:
+            status = ("error" if text.startswith(("Error", "⚠", "⛔")) else "ok")
         self.checkpoints.record(
             "tool_done", actor="lead", name=tc.name, tool=tc.name,
             input=str(tc.arguments), output=text, status=status,
             files=self._tool_files(tc),
+            data={"args": dict(tc.arguments or {})},
         )
-        if approval:
+        if pending:
             # the design's ④/⑤: paused for a human decision is a hard boundary,
-            # and the pending command must survive the process dying
-            self.checkpoints.record("approval", actor="system", tool=tc.name,
-                                    output=text, status="pending")
+            # and the pending command must survive the process dying. One event,
+            # not two: this *is* the tool_done of that bash call, and emitting a
+            # second snapshot one line later only duplicated the state.
+            self.checkpoints.record(
+                "approval", actor="system", name=pending.get("tool", tc.name),
+                tool=pending.get("tool", tc.name), input=str(tc.arguments),
+                output=text, status="pending",
+                data={"command": pending.get("command", ""),
+                      "reason": pending.get("reason", ""),
+                      "args": dict(tc.arguments or {})},
+            )
 
     @staticmethod
     def _tool_files(tc) -> list[str]:
@@ -350,18 +384,25 @@ class Agent:
         disk, so it needs no restoring. The handoff note is parked and injected
         into the next request as a prelude, because a restored agent must
         re-orient before it works.
+
+        The state swap goes in through ``apply`` rather than happening after the
+        call: the manager takes the rewind snapshot itself, and it has to be
+        taken once the agent has actually moved, or the new head describes the
+        world the user just left and re-restoring it undoes the restore.
         """
         if self.checkpoints is None:
             return False, "checkpoint 未启用（用 ENCODER_CHECKPOINT_ENABLED=1 开启）"
         if not self.checkpoints.adopt(cp_id):
             return False, f"未找到断点 {cp_id}"
-        restored = self.checkpoints.restore(cp_id)
+
+        def apply_state(restored):
+            self.messages.clear()
+            self.messages.extend(restored.messages)
+            self.todos.restore(restored.todos)
+
+        restored = self.checkpoints.restore(cp_id, apply=apply_state)
         if restored is None:
             return False, f"断点 {cp_id} 读取失败（文件可能已损坏）"
-
-        self.messages.clear()
-        self.messages.extend(restored.messages)
-        self.todos.restore(restored.todos)
         return True, restored.handoff
 
     def _append_memory_notice(self, reply: str, result) -> str:
@@ -384,6 +425,20 @@ class Agent:
             inspect.signature(tool.execute).bind(**tc.arguments)
         except TypeError as e:
             return f"Error: bad arguments for {tc.name}: {e}"
+        # ⑤: a marker written *before* a call that is likely to run long. Its whole
+        # value is that it exists when the call does not come back -- a command
+        # killed halfway (SIGKILL, a closed terminal, Ctrl+C inside the tool) is
+        # answered by this event and nothing else, because `tool_done` never runs.
+        # Emitted here rather than at the call sites because both the single and
+        # the parallel path funnel through this one, and because it is *literally*
+        # after the argument check: a call that never starts deserves no marker.
+        if self.checkpoints is not None:
+            from .checkpoint import looks_long
+            args = dict(tc.arguments or {})
+            if looks_long(tc.name, args):
+                self._record("tool_start", actor="lead", name=tc.name, tool=tc.name,
+                             input=str(tc.arguments),
+                             data={"long": True, "args": args})
         try:
             return tool.execute(**tc.arguments)
         except Exception as e:

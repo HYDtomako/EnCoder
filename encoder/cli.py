@@ -13,6 +13,7 @@ from rich.panel import Panel
 
 from . import __version__
 from .agent import Agent
+from .checkpoint import describe_error
 from .config import Config
 from .cron_scheduler import get_scheduler
 from .llm import LLM, LiteLLM
@@ -703,8 +704,16 @@ def _cmd_checkpoint(agent: Agent, user_input: str):
         for m in metas:
             mark = "[green]→[/green]" if m.get("id") == head else " "
             extra = f"  [dim]合并 {len(m['replaces'])} 个[/dim]" if m.get("replaces") else ""
+            # "可续跑": the short resume descriptor rides in meta precisely so
+            # this listing can say so without loading a full state (v2 §11.3)
+            resume = m.get("resume") or {}
+            if resume:
+                kind = resume.get("kind", "task")
+                extra += f"  [magenta]↻{kind}[/magenta]"
             console.print(f" {mark} [cyan]{m['id']}[/cyan]  {m.get('created_at','')}  "
                           f"{m.get('label','')}{extra}")
+        console.print("[dim]↻ = 这个断点知道下一步该做什么；/checkpoint show <id> 看细节，"
+                      "restore 之后回复「继续」即可接上。[/dim]")
         return
 
     if cmd == "show":
@@ -761,7 +770,17 @@ def _show_checkpoint(agent: Agent, cp_id: str):
         console.print("  队友: " + ", ".join(
             f"{r.get('name')}({r.get('status')})" for r in execu["running"]))
     if execu.get("pending_approval"):
-        console.print(f"  [yellow]待批准命令: {execu['pending_approval']}[/yellow]")
+        approval = execu["pending_approval"]
+        console.print(f"  [yellow]待批准: {approval.get('command') or '(无命令)'}"
+                      f"（{approval.get('reason') or approval.get('tool', '')}）[/yellow]")
+    if execu.get("pending_tool_call"):
+        call = execu["pending_tool_call"]
+        console.print(f"  [yellow]未答完的调用: {call.get('tool')}"
+                      f"({call.get('args')})[/yellow]")
+    if execu.get("last_error"):
+        console.print(f"  [red]上次为什么停下: {describe_error(execu['last_error'])}[/red]")
+    if execu.get("resume") and execu["resume"].get("kind") == "review":
+        console.print("  [magenta]这是 review 任务：恢复后接着执行，别重新派队友[/magenta]")
     cp_env = state.get("env", {})
     console.print(f"  env: cwd={cp_env.get('cwd')} branch={cp_env.get('branch') or '-'} "
                   f"HEAD={cp_env.get('git_head') or '-'}")
@@ -784,7 +803,8 @@ def _restore_checkpoint(agent: Agent, cp_id: str, required: bool = False) -> boo
         return False
     console.print(f"[green]已恢复到断点 {cp_id}[/green]")
     console.print(message)
-    console.print("[dim]恢复的是 agent 状态（messages/todos）。下一条消息会带上这份交接单。[/dim]")
+    console.print("[dim]恢复的是 agent 状态（messages/todos）。下一条消息会带上这份交接单；"
+                  "想接着原任务做，直接回复「继续」即可（会把原任务一起带回来）。[/dim]")
     return True
 
 
