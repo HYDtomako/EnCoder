@@ -92,7 +92,7 @@ class CheckpointTool(Tool):
 
         # "manual" always writes (it is in FORCE_TRIGGERS), so the head is the
         # checkpoint this call just produced
-        cps.record("manual", actor="lead", name=label, data=data)
+        cps.record("manual", actor="lead", data=data)
         cp_id = cps.head_id()
         if not cp_id:
             return "checkpoint 写入失败（已忽略，不影响继续工作）"

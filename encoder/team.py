@@ -172,11 +172,13 @@ class Teammate:
     """A persistent worker: its own ``Agent`` on its own thread, work/idle/ending."""
 
     def __init__(self, name: str, agent, mailbox: Mailbox, tasks,
-                 worktree: Path | None = None, branch: str | None = None):
+                 worktree: Path | None = None, branch: str | None = None,
+                 on_event=None):
         self.name = name
         self.agent = agent
         self.mailbox = mailbox
         self.tasks = tasks                      # the Lead's TaskManager
+        self.on_event = on_event                # report status hops to the log
         self.status = "idle"
         self.thread: threading.Thread | None = None
         self.current_task_id: str | None = None
@@ -188,6 +190,21 @@ class Teammate:
     def start(self) -> None:
         self.thread = threading.Thread(target=self._run, name=self.name, daemon=True)
         self.thread.start()
+
+    def _set_status(self, status: str) -> None:
+        """Move the state machine and report the hop (trace §3.5).
+
+        The teammate's two *meaningful* hops -- picking work up and putting it
+        down -- had no event at all: the Lead's log showed a teammate being
+        spawned and released, and nothing in between. `ending` is not repeated
+        here; the release event already says it.
+        """
+        previous, self.status = self.status, status
+        if self.on_event is not None:
+            self.on_event("status", name=self.name, status=status,
+                          previous=previous, to=status,
+                          task_id=self.current_task_id or "",
+                          branch=self._branch or "", worktree=self._worktree or "")
 
     def _run(self) -> None:
         if self._worktree:
@@ -214,7 +231,7 @@ class Teammate:
                 prompt = msg.get("content", "")
                 is_task = False
 
-            self.status = "work"
+            self._set_status("work")
             try:
                 result = self.agent.chat(prompt)
             except Exception as e:
@@ -226,7 +243,7 @@ class Teammate:
             try:
                 self._commit_work()
             finally:
-                self.status = "idle"
+                self._set_status("idle")
 
             if is_task:
                 self._report_task(self.current_task_id, result)
@@ -493,7 +510,7 @@ class TeamManager:
                     )
 
             teammate = Teammate(name, agent, self.mailbox, tasks,
-                                worktree=wt, branch=branch)
+                                worktree=wt, branch=branch, on_event=self._notify)
             teammate._wt_note = wt_note
             teammate.current_task_id = task.task_id
             self._teammates[name] = teammate

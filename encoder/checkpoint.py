@@ -34,6 +34,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -55,6 +56,9 @@ SOFT_MAX_INTERVAL = 60.0    # ... or after this many seconds, whichever comes fi
 MAX_CHECKPOINTS = 50        # above this, compact() runs automatically
 KEEP_CHECKPOINTS = 10       # compact() always keeps this many recent snapshots
 ERROR_EXPIRY_EVENTS = 200   # an unresolved error this many events old goes stale
+SLOW_CALL_MS = 1000         # a tool call at least this slow is worth its duration
+PATCH_LIMIT = 3000          # a stored diff longer than this is cut ...
+PATCH_KEEP = 2500           # ... to this, keeping the head (the edit's context)
 
 #: Tools whose effects re-running the agent cannot undo. A snapshot after one of
 #: these is worth its cost; after ``read_file`` / ``grep`` it is pure waste.
@@ -192,6 +196,26 @@ def _brief(text, limit: int) -> str:
     return s if len(s) <= limit else s[:limit] + f"… (+{len(s) - limit} chars)"
 
 
+#: Tool arguments whose value is file *content* rather than a parameter. They are
+#: summarized instead of stored: the log keeps pointers and patches, never whole
+#: bodies -- "content belongs to git" (design_trace_v1 §3.2). Before this, a
+#: `write_file` copied the entire file body into the event log, which is exactly
+#: the "存全文" the checkpoint design promised not to do.
+_CONTENT_ARGS = ("content", "old_string", "new_string", "patch")
+_CONTENT_HEAD = 200
+
+
+def _clip_content_args(args: dict) -> dict:
+    """Summarize content-carrying arguments, keeping the rest verbatim."""
+    out = {}
+    for key, value in args.items():
+        if key in _CONTENT_ARGS and isinstance(value, str) and len(value) > _CONTENT_HEAD:
+            out[key] = f"<{len(value)} chars> {value[:_CONTENT_HEAD]}…"
+        else:
+            out[key] = value
+    return out
+
+
 def strip_continue(text) -> str:
     """Peel every leading "carry on" marker off ``text``.
 
@@ -267,30 +291,117 @@ def classify_error(tool: str, output: str, args: dict | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Change registry - what a tool changed, collected by the tool itself
+# --------------------------------------------------------------------------- #
+
+#: Thread-local, because parallel tool calls each run in their own thread
+#: (``agent._exec_tools_parallel``) while the event that reports them is written
+#: afterwards on the main one. One shared list would interleave two edits, and
+#: the *event* would then claim the wrong call changed the wrong file -- worse
+#: than having no change at all.
+_pending_changes = threading.local()
+
+
+def record_change(path: str, kind: str, *, patch: str = "") -> None:
+    """Note what the current tool call changed, for the ``tool_done`` to come.
+
+    Called by the tool, because it is the only thing holding both the before and
+    the after. The event only relays it: ``change`` says what happened, and the
+    log keeps the *diff*, never the body -- the size of a change should follow the
+    edit, not the file.
+
+    ``added`` / ``removed`` are counted here, before the patch is cut: once a
+    patch is truncated the counts are the only evidence of how big it was, so
+    they cannot be derived later.
+    """
+    added, removed = _patch_counts(str(patch))
+    pending = getattr(_pending_changes, "items", None)
+    if pending is None:
+        pending = _pending_changes.items = []
+    pending.append({"path": rel_path(str(path)), "kind": kind, "added": added,
+                    "removed": removed, "patch": _clip_patch(str(patch))})
+
+
+def _patch_counts(patch: str) -> tuple[int, int]:
+    """Added / removed line counts read off a unified diff."""
+    added = removed = 0
+    for line in patch.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            removed += 1
+    return added, removed
+
+
+def _clip_patch(patch: str) -> str:
+    """Bound the stored patch (same cut the edit tool has always used)."""
+    if len(patch) <= PATCH_LIMIT:
+        return patch
+    return patch[:PATCH_KEEP] + "\n... (patch truncated)\n"
+
+
+def take_changes() -> list[dict]:
+    """Drain the changes recorded on this thread (empty list when there are none)."""
+    pending = getattr(_pending_changes, "items", None)
+    _pending_changes.items = []
+    return pending or []
+
+
+# --------------------------------------------------------------------------- #
 # Event - one line of the append-only log
 # --------------------------------------------------------------------------- #
+
+#: The generic ``name`` field is gone (v1 §3.4), but logs written before that are
+#: not: an old line's ``name`` is read into the named slot its own event type gave
+#: it, so a year-old ``events.jsonl`` still renders. The tool-ish events need no
+#: entry -- their subject was already duplicated in ``tool``. Neither does
+#: ``rewind``: it is the one old event whose ``name`` meant two different things,
+#: and the restore id is already in ``data.restored_from``.
+_LEGACY_NAME_SLOT = {
+    "todo_changed": "todo_id",
+    "task_changed": "task_id",
+    "teammate_changed": "task_id",
+    "manual": "label",
+    "session_start": "session",
+    "compress": "layer",
+}
+
 
 @dataclass
 class Event:
     """A single thing that happened.
 
-    ``name`` / ``tool`` / ``input`` / ``output`` / ``status`` / ``error`` /
-    ``files`` / ``workspace`` exist for the trace (``design_trace.md``): the same
-    stream answers "what did the agent do, with what, and did it work".
+    ``tool`` / ``input`` / ``output`` / ``status`` / ``files`` / ``workspace``
+    exist for the trace (``design_trace.md``): the same stream answers "what did
+    the agent do, with what, and did it work".
+
+    The trace additions (``design_trace_v1.md``): ``call_id`` joins a decision
+    (``llm_call``) to the execution it caused; ``change`` says what a tool
+    changed; ``focus`` says which task/todo the step served; ``workspace`` filled
+    in says where it ran. ``duration_ms`` is kept only where a call can actually
+    be slow.
+
+    There is deliberately no generic ``name`` (v1 §3.4): "who did it" is
+    ``actor``, and "what it was about" is a named key on the event that owns it
+    (``tool``, ``data.todo_id``, ``data.task_id``, ``data.label``,
+    ``data.session``). One field that could hold anything was holding the wrong
+    thing -- teammate events put every one of them on the Lead.
     """
 
     seq: int = 0
     ts: str = ""
     type: str = ""
     actor: str = "lead"          # lead | agent_N | subagent | integrator | system | user
-    name: str = ""               # who/what this is about (teammate name, task id...)
     tool: str = ""
     input: str = ""
     output: str = ""
     status: str = ""             # ok | error | pending
-    error: str = ""
     files: list = field(default_factory=list)
     workspace: dict = field(default_factory=dict)
+    call_id: str = ""            # tool_call id: joins an llm_call to what it caused
+    duration_ms: int | None = None   # measured, never derived from ts (second-grain)
+    change: list = field(default_factory=list)   # what a tool changed (diff, not body)
+    focus: dict = field(default_factory=dict)    # {task_id, todo_id} in force here
     data: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -303,8 +414,18 @@ class Event:
 
     @classmethod
     def from_dict(cls, data: dict) -> Event:
-        known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        known = set(cls.__dataclass_fields__)
+        fields = {k: v for k, v in data.items() if k in known}
+        # ``error`` needs no migration: it was read but never written, so no log
+        # on disk carries one. ``name`` does, which is the whole point of the map.
+        legacy = str(data.get("name", "") or "")
+        slot = _LEGACY_NAME_SLOT.get(str(fields.get("type", "")))
+        if legacy and slot:
+            block = fields.get("data")
+            if not isinstance(block, dict):
+                block = fields["data"] = {}      # an old line may carry no data at all
+            block.setdefault(slot, legacy)
+        return cls(**fields)
 
 
 def _repeat_of(event: Event) -> int:
@@ -325,6 +446,12 @@ def trigger_for(event: Event) -> str | None:
     This is the ONLY mapping between the two vocabularies; keep it exhaustive.
     """
     t = event.type
+    if t == "llm_call":
+        # Every round produces one, and it changes nothing irreversible, so it can
+        # never justify a snapshot ("不要无脑保存"). Stated explicitly rather than
+        # left to the fall-through: it is the event most likely to be added to
+        # HARD_TRIGGERS by accident, and a test pins this line.
+        return None
     if t == "tool_start":
         # ⑤: logged *before* a call that is likely to run long. The event only
         # exists for those, but the policy still reads the flag rather than
@@ -646,6 +773,22 @@ class CheckpointManager:
         self._resume_text = ""       # the task text that generation counts
         self._pending_resume: dict | None = None
 
+        # -- trace: the two values stamped only when they change ---------------- #
+        # Both are in the hot path, so they are written as a *delta*: a line says
+        # "the environment changed here", and readers inherit forward. The stamp
+        # is what was last written, not what is current, so it starts as "nothing
+        # in progress" and the first line stays clean. If the process dies before
+        # the next event the values are rebuilt from the events themselves
+        # (teammate spawn/release and task/todo_changed), which is exactly why
+        # they are derived from events rather than pushed by callers.
+        self._task_focus = ""        # task the agent is working on (in_progress)
+        self._todo_focus = ""        # todo ditto
+        self._focus_stamped: dict = {"task_id": "", "todo_id": ""}
+        self._env_cache: dict = {}          # the Lead's environment fingerprint
+        self._env_stamped: dict = {}        # per actor: what each line last said
+        if self.enabled:
+            self._lead_env()            # warm it, so the first stamp is not a diff
+
         path = self.base_dir / self.session_id
         self.log = EventLog(path / "events.jsonl")
         if self.enabled:
@@ -730,6 +873,19 @@ class CheckpointManager:
                 fields["output"] = _brief(fields["output"], limit)
             if fields.get("input") and event_type in ("tool_done", "approval"):
                 fields["input"] = _brief(fields["input"], _INPUT_LIMIT)
+            # args were never clipped, so `write_file` copied a whole file body
+            # into the log. Content is the one thing the log must not carry
+            # whole; the change it produces is (see `change`).
+            data = fields.get("data")
+            if isinstance(data, dict) and isinstance(data.get("args"), dict):
+                fields["data"] = {**data, "args": _clip_content_args(data["args"])}
+
+            focus = self._focus_stamp()
+            if focus is not None:
+                fields["focus"] = focus
+            workspace = self._workspace_stamp(actor, fields)
+            if workspace is not None:
+                fields["workspace"] = workspace
 
             event = self.log.emit(event_type, actor=actor, **fields)
             self._digest_event(event)
@@ -768,6 +924,9 @@ class CheckpointManager:
             self._files_seen.add(str(f))
         for f in (event.data or {}).get("files") or []:
             self._files_seen.add(str(f))
+
+        if event.type in ("task_changed", "todo_changed"):
+            self._track_focus(event)
 
         if event.type == "user_message":
             self._last_user = str((event.data or {}).get("raw") or event.input or "")
@@ -824,13 +983,13 @@ class CheckpointManager:
             intent = (self._explicit_next.get("reason", "")
                       or self._explicit_next.get("args", {}).get("intent", "")
                       or self._explicit_next.get("tool", ""))
-        return {"tool": event.tool or event.name, "target": str(target),
+        return {"tool": event.tool, "target": str(target),
                 "command": _brief(command, 200), "intent": _brief(intent, 200)}
 
     def _note_error(self, event: Event) -> None:
         """Record a failure, and how many times this same one has now happened."""
         task = self._task_of(event)
-        reason = classify_error(task["tool"], event.error or event.output,
+        reason = classify_error(task["tool"], event.output,
                                 (event.data or {}).get("args") or {})
         same = [e for e in self._errors
                 if not e.get("resolved")
@@ -839,7 +998,7 @@ class CheckpointManager:
         # handed to the policy through the event, so should_checkpoint can stay pure
         event.data = {**(event.data or {}), "repeat": repeat - 1}
         self._errors.append({
-            "task": task, "reason": reason, "raw": _brief(event.error or event.output, 300),
+            "task": task, "reason": reason, "raw": _brief(event.output, 300),
             "actor": event.actor, "seq": event.seq, "at": event.ts,
             "repeat": repeat, "resolved": False, "resolved_by": 0,
         })
@@ -852,7 +1011,7 @@ class CheckpointManager:
         Without this the handoff would re-read a failure that was already fixed,
         which is the "repeatedly fixing the same thing" the review asked about.
         """
-        tool = event.tool or event.name
+        tool = event.tool
         target = self._task_of(event)["target"]
         for err in self._errors:
             if err.get("resolved"):
@@ -946,6 +1105,10 @@ class CheckpointManager:
                 return None
             self._writing = True
             try:
+                # A snapshot is the one moment the environment is worth re-reading
+                # in full anyway: the cheap cwd shortcut must not carry across it,
+                # or a branch switch would sit in the cached fingerprint forever.
+                self.refresh_env()
                 state = self._collect_state()
                 fingerprint = _fingerprint(state)
                 if not force and fingerprint == self._last_fingerprint:
@@ -1146,6 +1309,96 @@ class CheckpointManager:
         return {"kind": kind if kind in RESUME_KINDS else "task",
                 "text": text, "next": nxt,
                 "generation": generation, "source_cp": self._head_id()}
+
+    # -- trace stamping -------------------------------------------------------- #
+
+    def _focus_stamp(self) -> dict | None:
+        """``{task_id, todo_id}`` if it changed since the last stamped line.
+
+        Deliberately always holds both keys (empty string when there is none):
+        ``to_dict`` drops empty dicts, so an all-empty focus would vanish from the
+        line and "the task ended here" would be unreadable. An explicit blank is
+        the signal.
+        """
+        focus = {"task_id": self._task_focus, "todo_id": self._todo_focus}
+        if self._focus_stamped == focus:
+            return None
+        self._focus_stamped = dict(focus)
+        return focus
+
+    def _workspace_stamp(self, actor: str, fields: dict) -> dict | None:
+        """The environment this event ran in, when it differs from the last line.
+
+        Keyed by actor: the Lead and each teammate work in different places, so
+        one shared "current" would flap between them.
+        """
+        env = self._env_for(actor, fields)
+        if not env or self._env_stamped.get(actor) == env:
+            return None
+        self._env_stamped[actor] = env
+        return env
+
+    def _env_for(self, actor: str, fields: dict) -> dict:
+        """The environment of whoever produced this event.
+
+        Only team events carry their own placement (spawn/release/status know
+        their worktree and branch); everything else -- Lead and non-isolated
+        teammates alike -- is where the process is, which is the same directory.
+        """
+        data = fields.get("data") if isinstance(fields.get("data"), dict) else {}
+        worktree = str((data or {}).get("worktree") or "")
+        if worktree:
+            root = _git(["rev-parse", "--show-toplevel"], cwd=worktree) or worktree
+            return {"kind": "worktree", "root": root,
+                    "branch": str((data or {}).get("branch") or ""),
+                    "head": _git(["rev-parse", "--short", "HEAD"], cwd=worktree),
+                    "worktree": rel_path(root), "agent": actor}
+        return self._lead_env()
+
+    def _lead_env(self) -> dict:
+        """The Lead's fingerprint, recomputed only when the cwd moves.
+
+        Three ``git`` calls per event would be absurd on the hot path; comparing
+        the cwd is free. The cost of the shortcut is that a mid-turn ``git
+        checkout`` surfaces at the next ``snapshot()`` rather than instantly,
+        which is the right trade for a value that is only ever read offline.
+        """
+        import os
+        cwd = os.getcwd()
+        if self._env_cache.get("root") == cwd:
+            return self._env_cache
+        self._env_cache = {
+            "kind": "repo",
+            "root": cwd,
+            "branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
+            "head": _git(["rev-parse", "--short", "HEAD"]),
+        }
+        return self._env_cache
+
+    def refresh_env(self) -> None:
+        """Force a re-read. A snapshot is a moment worth re-checking the world."""
+        self._env_cache = {}
+        self._lead_env()
+
+    # -- digest: focus --------------------------------------------------------- #
+
+    def _track_focus(self, event: Event) -> None:
+        """Follow "which task/todo is in progress", off the change events.
+
+        Derived here rather than pushed by the task/todo callers so that
+        ``_rebuild_digest`` gets it for free after a restart -- the same rule as
+        everything else in the digest.
+        """
+        data = event.data or {}
+        to = str(data.get("to") or event.status or "")
+        if event.type == "task_changed":
+            ident, slot = str(data.get("task_id") or ""), "_task_focus"
+        else:
+            ident, slot = str(data.get("todo_id") or ""), "_todo_focus"
+        if to == "in_progress":
+            setattr(self, slot, ident)
+        elif to in ("completed", "archived", "abandoned") and getattr(self, slot) == ident:
+            setattr(self, slot, "")     # finished: nothing is being worked on now
 
     def _env_view(self) -> dict:
         """Environment fingerprint only -- no file contents, ever."""
@@ -1411,8 +1664,9 @@ class CheckpointManager:
         # belongs *after* ``apply`` (below), and letting the event trigger one
         # would put a stale state back at the head. History is still never
         # rewritten -- the post-apply snapshot is a new cp, not an edit.
-        self._log_only("rewind", actor="user", name=cp_id,
-                       data={"restored_from": cp_id, "seq": cp.get("meta", {}).get("seq", 0)})
+        self._log_only("rewind", actor="user",
+                       data={"cp_id": cp_id, "restored_from": cp_id,
+                             "seq": cp.get("meta", {}).get("seq", 0)})
 
         restored = Restored(checkpoint_id=cp_id, messages=messages, todos=todos,
                             handoff=handoff, env_changes=changes, resume=resume,
@@ -1454,7 +1708,7 @@ class CheckpointManager:
         for e in later:
             if e.type not in ("tool_done", "approval") or e.status != "ok":
                 continue
-            if (e.tool or e.name) == task.get("tool") and \
+            if e.tool == task.get("tool") and \
                     self._task_of(e)["target"] == task.get("target"):
                 return None
         return err
@@ -1983,15 +2237,28 @@ def repair_chain(messages: list[dict]) -> list[dict]:
     return out
 
 
-def _git(args: list[str]) -> str:
+def _git(args: list[str], cwd: str | None = None) -> str:
     """Best-effort git query; empty string when not a repo or git is missing."""
     try:
         cp = subprocess.run(["git", *args], capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=5,
-                            check=False)
+                            check=False, cwd=cwd)
     except (OSError, subprocess.SubprocessError):
         return ""
     return (cp.stdout or "").strip() if cp.returncode == 0 else ""
+
+
+def rel_path(path: str) -> str:
+    """Repo-relative when it is underneath us; absolute paths are machine-specific.
+
+    Public because the tools build a diff header with it too: ``change.path`` and
+    the ``--- a/...`` line above it must name one file the same way.
+    """
+    try:
+        rel = os.path.relpath(path)
+    except (ValueError, OSError):
+        return path
+    return path if rel.startswith("..") else rel.replace("\\", "/")
 
 
 def _dirty_files() -> set[str]:

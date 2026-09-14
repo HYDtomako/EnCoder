@@ -153,7 +153,7 @@ def test_milestones_are_a_subset_of_hard_triggers():
 def test_append_is_monotonic_and_survives_reload(tmp_path):
     log = EventLog(tmp_path / "events.jsonl")
     for i in range(5):
-        log.emit("tool_done", tool="read_file", name=str(i))
+        log.emit("tool_done", tool="read_file")
     assert log.seq == 5
 
     reloaded = EventLog(tmp_path / "events.jsonl")
@@ -181,7 +181,7 @@ def test_concurrent_appends_never_duplicate_a_seq(tmp_path):
 
     def work(n):
         for i in range(25):
-            log.emit("tool_done", actor=f"agent_{n}", tool="read_file", name=str(i))
+            log.emit("tool_done", actor=f"agent_{n}", tool="read_file")
 
     threads = [threading.Thread(target=work, args=(n,)) for n in range(4)]
     for t in threads:
@@ -420,7 +420,7 @@ def test_compacted_snapshot_still_restores(mgr):
 
 def test_compaction_trims_the_event_log_without_losing_it(mgr):
     for i in range(20):
-        mgr.record("tool_done", tool="write_file", name=f"f{i}.py")
+        mgr.record("tool_done", tool="write_file")
         mgr.agent.messages.append({"role": "assistant", "content": f"step{i}"})
         mgr.snapshot(trigger="tool", force=True)
 
@@ -618,7 +618,7 @@ def test_restoring_twice_cannot_stack_the_prefix(mgr):
 # --------------------------------------------------------------------------- #
 
 def _fail(mgr, tool="edit_file", target="encoder/agent.py", output="old_string not found"):
-    mgr.record("tool_done", actor="lead", tool=tool, name=tool, status="error",
+    mgr.record("tool_done", actor="lead", tool=tool, status="error",
                output=output, data={"args": {"file_path": target}})
 
 
@@ -662,7 +662,7 @@ def test_the_reason_is_a_closed_set_of_kinds():
 
 def test_a_later_success_retires_the_failure(mgr):
     _fail(mgr)
-    mgr.record("tool_done", actor="lead", tool="edit_file", name="edit_file",
+    mgr.record("tool_done", actor="lead", tool="edit_file",
                status="ok", output="ok", data={"args": {"file_path": "encoder/agent.py"}})
     # a snapshot taken *after* the fix is the one that may claim it is fixed
     mgr.snapshot(trigger="turn_end", force=True)
@@ -709,7 +709,7 @@ def test_a_snapshot_taken_before_the_fix_keeps_the_historical_verdict(mgr):
     at restore time exists instead (v2 §11.2d)."""
     _fail(mgr)
     cp_id = mgr.snapshot(trigger="manual", force=True)
-    mgr.record("tool_done", actor="lead", tool="edit_file", name="edit_file",
+    mgr.record("tool_done", actor="lead", tool="edit_file",
                status="ok", output="ok", data={"args": {"file_path": "encoder/agent.py"}})
 
     stamped = mgr.load(cp_id)["state"]["execution"]["last_error"]
@@ -719,7 +719,7 @@ def test_a_snapshot_taken_before_the_fix_keeps_the_historical_verdict(mgr):
 def test_a_success_elsewhere_does_not_retire_it(mgr):
     """Retirement is per tool+target; writing some other file fixes nothing."""
     _fail(mgr)
-    mgr.record("tool_done", actor="lead", tool="edit_file", name="edit_file",
+    mgr.record("tool_done", actor="lead", tool="edit_file",
                status="ok", output="ok", data={"args": {"file_path": "encoder/task.py"}})
     assert _head_execution(mgr)["last_error"] is not None
 
@@ -736,7 +736,7 @@ def test_restore_recomputes_resolved_against_the_log_tail(mgr):
     assert mgr.load(cp_id)["state"]["execution"]["last_error"], "snapshot says broken"
 
     # ...and then, before the process died, success
-    mgr.record("tool_done", actor="lead", tool="edit_file", name="edit_file",
+    mgr.record("tool_done", actor="lead", tool="edit_file",
                status="ok", output="ok", data={"args": {"file_path": "encoder/agent.py"}})
 
     restored = mgr.restore(cp_id)
@@ -894,7 +894,7 @@ def test_compaction_carries_unresolved_errors_forward(mgr):
 
 def test_teammate_failures_are_attributed_to_their_source(mgr):
     """A teammate failing is the Lead's business: actor records whose it was."""
-    mgr.record("tool_done", actor="rev_2", tool="bash", name="bash", status="error",
+    mgr.record("tool_done", actor="rev_2", tool="bash", status="error",
                output="command not found: pytest", data={"args": {"command": "pytest"}})
     err = _head_execution(mgr)["last_error"]
     assert err["actor"] == "rev_2"

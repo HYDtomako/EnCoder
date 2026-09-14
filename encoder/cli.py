@@ -369,6 +369,9 @@ def _repl(agent: Agent, config: Config):
         if user_input == "/checkpoint" or user_input.startswith("/checkpoint "):
             _cmd_checkpoint(agent, user_input)
             continue
+        if user_input == "/trace" or user_input.startswith("/trace "):
+            _cmd_trace(agent, user_input)
+            continue
 
         # an unknown /command shouldn't be sent to the model as a prompt
         if user_input.startswith("/"):
@@ -680,6 +683,54 @@ def _cmd_team(agent: Agent, user_input: str):
         console.print(line)
 
 
+def _cmd_trace(agent: Agent, user_input: str):
+    """Handle /trace: [list | <n>] [full] -- read the event log as a timeline.
+
+    A read-only view: it never touches the agent, so it is safe mid-session.
+    """
+    if agent.checkpoints is None:
+        console.print("[yellow]Trace 需要事件日志（ENCODER_CHECKPOINT_ENABLED=0 时没有）。[/yellow]")
+        return
+    from .trace import (
+        build_traces,
+        read_checkpoints,
+        read_events,
+        render_index,
+        render_trace,
+    )
+    session = agent.checkpoints.dir
+    events = read_events(session)
+    if not events:
+        console.print("[dim]这个 session 还没有事件（日志是空的）。[/dim]")
+        return
+    traces = build_traces(events, read_checkpoints(session))
+
+    parts = user_input.strip().split()[1:]
+    full = "full" in [p.lower() for p in parts]
+    parts = [p for p in parts if p.lower() != "full"]
+    which = parts[0] if parts else ""
+
+    if which in ("list", "ls"):
+        console.print(render_index(traces))
+        console.print("[dim]/trace <n> 看某一条；加 full 铺开输出与补丁。[/dim]")
+        return
+    if which:
+        try:
+            index = int(which)
+        except ValueError:
+            console.print("[yellow]Usage: /trace [list|<n>] [full][/yellow]")
+            return
+        picked = [t for t in traces if t.index == index]
+        if not picked:
+            console.print(f"[yellow]没有第 {index} 条 trace（共 {len(traces)} 条）。[/yellow]")
+            return
+        console.print(render_trace(picked[0], full=full))
+        return
+    console.print(render_trace(traces[-1], full=full))
+    console.print(f"[dim]这是最近一条 turn（共 {len(traces)} 条）：上面是结构，"
+                  "/trace list 看全程，/trace <n> full 看细节。[/dim]")
+
+
 def _cmd_checkpoint(agent: Agent, user_input: str):
     """Handle /checkpoint: list | show <id> | restore <id> | compact.
 
@@ -835,6 +886,8 @@ def _show_help():
         "                 /team integrate   Merge released worktree teammates back\n"
         "  /checkpoint    List recovery points; /checkpoint show <id> to inspect\n"
         "                 /checkpoint restore <id> | compact\n"
+        "  /trace         What the last turn actually did (timeline view)\n"
+        "                 /trace list | /trace <n> [full]\n"
         "  quit           Exit Encoder\n"
         "\n"
         "[bold]Input:[/bold]\n"
